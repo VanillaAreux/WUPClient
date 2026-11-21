@@ -166,14 +166,17 @@ static int g_sw, g_sh, g_dx, g_dy, g_dw, g_dh;      /* screen size and where it 
 static uint32_t g_prev;                              /* (virtual) buttons held last time */
 static int g_prevtouch;
 static double g_scroll, g_lookx, g_looky;
+static double g_looksens = 12.0, g_decksens = 9.0;   /* mouse speeds (wupclient.ini: look, cursor) */
 static volatile LONG g_mode;                         /* MODE_* */
 
 /* the virtual Xbox 360 controller (ViGEmBus) */
 static PVIGEM_CLIENT g_vg; static PVIGEM_TARGET g_pad; static DWORD g_vgtry;
 static wupstream *volatile g_curpad;                 /* the GamePad, for rumble */
 static XUSB_REPORT g_lastrep; static int g_haverep;
+static volatile LONG g_gamerumble;                   /* the game is asking for rumble */
 static void CALLBACK pad_rumble(PVIGEM_CLIENT c, PVIGEM_TARGET t, UCHAR large, UCHAR small_, UCHAR led, LPVOID user) {
     (void)c; (void)t; (void)led; (void)user;
+    g_gamerumble = (large || small_) ? 1 : 0;
     wupstream *p = g_curpad;
     if (p) wupstream_rumble(p, large || small_);
 }
@@ -196,7 +199,7 @@ static void pad_close(void) {
     vigem_target_x360_unregister_notification(g_pad);
     vigem_target_remove(g_vg, g_pad);
     vigem_target_free(g_pad);
-    g_pad = NULL;
+    g_pad = NULL; g_gamerumble = 0;
     wupstream *p = g_curpad; if (p) wupstream_rumble(p, 0);
 }
 static void pad_shutdown(void) {
@@ -244,7 +247,94 @@ static void send_mouse(DWORD flags, int dx, int dy, DWORD data) {
 }
 static int dead(int v) { return v > 150 ? v - 150 : v < -150 ? v + 150 : 0; }
 
+/* ---------------- on-screen keyboard ----------------
+ * HOME + X shows a keyboard on the bottom of the GamePad screen; tap keys on the touch screen. Shift / Ctrl / Alt / Win
+ * latch (tap once, they stay down for the next key), everything else is pressed while you touch it. */
+typedef struct { const char *lab; WORD vk; double w; int ext; } oskdef;
+#define OK(l, v) { l, v, 1.0, 0 }
+#define OKW(l, v, w) { l, v, w, 0 }
+#define OKE(l, v) { l, v, 1.0, 1 }
+static const oskdef OSK_R0[] = { OK("`", VK_OEM_3), OK("1", '1'), OK("2", '2'), OK("3", '3'), OK("4", '4'), OK("5", '5'), OK("6", '6'), OK("7", '7'),
+    OK("8", '8'), OK("9", '9'), OK("0", '0'), OK("-", VK_OEM_MINUS), OK("=", VK_OEM_PLUS), OKW("Bksp", VK_BACK, 2), { NULL, 0, 0, 0 } };
+static const oskdef OSK_R1[] = { OKW("Tab", VK_TAB, 1.5), OK("q", 'Q'), OK("w", 'W'), OK("e", 'E'), OK("r", 'R'), OK("t", 'T'), OK("y", 'Y'), OK("u", 'U'),
+    OK("i", 'I'), OK("o", 'O'), OK("p", 'P'), OK("[", VK_OEM_4), OK("]", VK_OEM_6), OKW("\\", VK_OEM_5, 1.5), { NULL, 0, 0, 0 } };
+static const oskdef OSK_R2[] = { OKW("Caps", VK_CAPITAL, 1.75), OK("a", 'A'), OK("s", 'S'), OK("d", 'D'), OK("f", 'F'), OK("g", 'G'), OK("h", 'H'),
+    OK("j", 'J'), OK("k", 'K'), OK("l", 'L'), OK(";", VK_OEM_1), OK("'", VK_OEM_7), OKW("Enter", VK_RETURN, 2.25), { NULL, 0, 0, 0 } };
+static const oskdef OSK_R3[] = { OKW("Shift", VK_LSHIFT, 2.25), OK("z", 'Z'), OK("x", 'X'), OK("c", 'C'), OK("v", 'V'), OK("b", 'B'), OK("n", 'N'),
+    OK("m", 'M'), OK(",", VK_OEM_COMMA), OK(".", VK_OEM_PERIOD), OK("/", VK_OEM_2), OKW("Shift", VK_LSHIFT, 2.75), { NULL, 0, 0, 0 } };
+static const oskdef OSK_R4[] = { OKW("Esc", VK_ESCAPE, 1.5), OKW("Ctrl", VK_LCONTROL, 1.5), OKE("Win", VK_LWIN), OK("Alt", VK_LMENU),
+    OKW("Space", VK_SPACE, 5.5), OKE("<", VK_LEFT), OKE("v", VK_DOWN), OKE("^", VK_UP), OKE(">", VK_RIGHT), { NULL, 0, 0, 0 } };
+#define OSK_RH 40
+#define OSK_Y (WUPSTREAM_H - 5 * OSK_RH - 6)
+typedef struct { RECT r; const char *lab; keymap k; int mod; } oskkey;
+static oskkey g_osk_keys[80]; static int g_osk_n;
+static unsigned char g_osk_latched[80];
+static int g_osk_held = -1;       /* key held by the finger: -1 none, -2 a latch key or a miss, else an index */
+static int g_prevraw;             /* raw touch state last time */
+static volatile LONG g_osk;
+static void osk_build(void) {
+    const oskdef *rows[5] = { OSK_R0, OSK_R1, OSK_R2, OSK_R3, OSK_R4 };
+    double u = (double)WUPSTREAM_W / 15.0; g_osk_n = 0;
+    for (int r = 0; r < 5; r++) {
+        double x = 0;
+        for (const oskdef *d = rows[r]; d->lab; d++) {
+            oskkey *k = &g_osk_keys[g_osk_n++];
+            k->r.left = (LONG)(x * u) + 1; k->r.right = (LONG)((x + d->w) * u) - 1;
+            k->r.top = OSK_Y + r * OSK_RH + 1; k->r.bottom = k->r.top + OSK_RH - 2;
+            k->lab = d->lab; k->k.mask = 0; k->k.vk = d->vk; k->k.scan = 1; k->k.ext = d->ext;
+            k->mod = d->vk == VK_LSHIFT || d->vk == VK_LCONTROL || d->vk == VK_LMENU || d->vk == VK_LWIN;
+            x += d->w;
+        }
+    }
+}
+static int osk_busy(void) { if (g_osk_held != -1) return 1; for (int i = 0; i < g_osk_n; i++) if (g_osk_latched[i]) return 1; return 0; }
+static void osk_release_latched(void) {
+    for (int i = 0; i < g_osk_n; i++) if (g_osk_latched[i]) { send_key(&g_osk_keys[i].k, 0); g_osk_latched[i] = 0; }
+}
+static void osk_release(void) {
+    if (g_osk_held >= 0) send_key(&g_osk_keys[g_osk_held].k, 0);
+    g_osk_held = -1; osk_release_latched();
+}
+/* returns 1 if this touch belongs to the keyboard (so it must not also move/click the mouse) */
+static int osk_touch(const wupstream_input_t *in) {
+    if (!g_osk_n) osk_build();
+    int consumed = 0;
+    if (in->touched) {
+        if (g_osk_held != -1) consumed = 1;
+        else if (!g_prevraw && in->ty >= OSK_Y - 4) {
+            consumed = 1; g_osk_held = -2;
+            for (int i = 0; i < g_osk_n; i++) {
+                oskkey *k = &g_osk_keys[i];
+                if (in->tx >= k->r.left && in->tx < k->r.right && in->ty >= k->r.top && in->ty < k->r.bottom) {
+                    if (k->mod) { g_osk_latched[i] ^= 1; send_key(&k->k, g_osk_latched[i]); }
+                    else { send_key(&k->k, 1); g_osk_held = i; }
+                    break;
+                }
+            }
+        }
+    } else if (g_osk_held != -1) {
+        if (g_osk_held >= 0) { send_key(&g_osk_keys[g_osk_held].k, 0); osk_release_latched(); }
+        g_osk_held = -1; consumed = 1;
+    }
+    return consumed;
+}
+static void draw_osk(HDC dc, HFONT f) {
+    if (!g_osk) return;
+    if (!g_osk_n) osk_build();
+    RECT bg = { 0, OSK_Y - 4, WUPSTREAM_W, WUPSTREAM_H };
+    HBRUSH b = CreateSolidBrush(RGB(20, 20, 24)); FillRect(dc, &bg, b); DeleteObject(b);
+    HGDIOBJ old = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+    for (int i = 0; i < g_osk_n; i++) {
+        oskkey *k = &g_osk_keys[i];
+        b = CreateSolidBrush(i == g_osk_held ? RGB(30, 110, 210) : g_osk_latched[i] ? RGB(200, 120, 10) : RGB(62, 62, 70));
+        FillRect(dc, &k->r, b); DeleteObject(b);
+        RECT t = k->r; DrawTextA(dc, k->lab, -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+    SelectObject(dc, old);
+}
+
 static void release_all(void) {
+    osk_release();
     for (size_t n = 0; n < g_ntab; n++) if (g_prev & g_tab[n].mask) send_key(&g_tab[n], 0);
     for (size_t n = 0; n < g_nclk; n++) if (g_prev & g_clk[n].mask) send_mouse(g_clk[n].up, 0, 0, 0);
     if (g_prevtouch) send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0);
@@ -272,18 +362,22 @@ static void apply_input(const wupstream_input_t *in, int mode) {
         if (ch & g_clk[n].mask) send_mouse((b & g_clk[n].mask) ? g_clk[n].down : g_clk[n].up, 0, 0, 0);
     g_prev = b;
 
-    if (in->touched) {                               /* the picture sits in a box on the pad's screen: map back to the PC screen */
+    if (!g_osk && osk_busy()) osk_release();
+    int consumed = g_osk ? osk_touch(in) : 0;        /* a touch on the on-screen keyboard is not a mouse touch */
+    g_prevraw = in->touched;
+    int mt = in->touched && !consumed;
+    if (mt) {                                        /* the picture sits in a box on the pad's screen: map back to the PC screen */
         int x = (in->tx - g_dx) * g_sw / g_dw, y = (in->ty - g_dy) * g_sh / g_dh;
         x = x < 0 ? 0 : x >= g_sw ? g_sw - 1 : x; y = y < 0 ? 0 : y >= g_sh ? g_sh - 1 : y;
         send_mouse(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, x * 65535 / (g_sw - 1 ? g_sw - 1 : 1), y * 65535 / (g_sh - 1 ? g_sh - 1 : 1), 0);
         if (!g_prevtouch) send_mouse(MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
     } else if (g_prevtouch) send_mouse(MOUSEEVENTF_LEFTUP, 0, 0, 0);
-    g_prevtouch = in->touched;
+    g_prevtouch = mt;
 
     if (mode == MODE_KM) {                           /* right stick: mouse look (a curve: small pushes are precise, fractions are kept) */
         int rx = dead(in->rx), ry = dead(in->ry);
         double fx = rx / 950.0, fy = ry / 950.0;
-        g_lookx += fx * (fx < 0 ? -fx : fx) * 30.0; g_looky -= fy * (fy < 0 ? -fy : fy) * 30.0;
+        g_lookx += fx * (fx < 0 ? -fx : fx) * g_looksens; g_looky -= fy * (fy < 0 ? -fy : fy) * g_looksens;
         int mx = (int)g_lookx, my = (int)g_looky;
         g_lookx -= mx; g_looky -= my;
         if (mx || my) send_mouse(MOUSEEVENTF_MOVE, mx, my, 0);
@@ -291,8 +385,8 @@ static void apply_input(const wupstream_input_t *in, int mode) {
         int lx = dead(in->lx), ly = dead(in->ly);    /* left stick: mouse */
         if (lx || ly) {
             double fx = lx / 950.0, fy = ly / 950.0;
-            int mx = (int)(fx * (fx < 0 ? -fx : fx) * 24 + (fx > 0 ? 1 : fx < 0 ? -1 : 0));
-            int my = (int)(-fy * (fy < 0 ? -fy : fy) * 24 - (fy > 0 ? 1 : fy < 0 ? -1 : 0));
+            int mx = (int)(fx * (fx < 0 ? -fx : fx) * g_decksens + (fx > 0 ? 1 : fx < 0 ? -1 : 0));
+            int my = (int)(-fy * (fy < 0 ? -fy : fy) * g_decksens - (fy > 0 ? 1 : fy < 0 ? -1 : 0));
             send_mouse(MOUSEEVENTF_MOVE, mx, my, 0);
         }
         int ry = dead(in->ry);                       /* right stick: scroll (push up = scroll up) */
@@ -428,13 +522,12 @@ static void text_box(HDC dc, HFONT f, const char *t, int x, int y, COLORREF bg, 
     TextOutA(dc, x + pad, y + pad / 2, t, (int)strlen(t));
     SelectObject(dc, old);
 }
-static void draw_overlay(HDC dc, HFONT fs, HFONT fl, int mode, int banner) {
-    if (mode < 0 || mode > 3) return;
-    text_box(dc, fs, SHORT_NAMES[mode], 6, 6, MODE_COL[mode], 0);
-    if (banner) {
-        text_box(dc, fl, SHORT_NAMES[mode], WUPSTREAM_W / 2, WUPSTREAM_H - 110, MODE_COL[mode], 1);
-        text_box(dc, fs, "HOME + PLUS / MINUS = switch mode", WUPSTREAM_W / 2, WUPSTREAM_H - 56, RGB(40, 40, 40), 1);
-    }
+static void draw_overlay(HDC dc, HFONT fs, HFONT fl, int mode, int show) {      /* only while HOME is held / right after a switch */
+    if (!show || mode < 0 || mode > 3) return;
+    text_box(dc, fl, SHORT_NAMES[mode], WUPSTREAM_W / 2, WUPSTREAM_H - 172, MODE_COL[mode], 1);
+    text_box(dc, fs, "HOME + PLUS / MINUS = next / previous mode", WUPSTREAM_W / 2, WUPSTREAM_H - 122, RGB(40, 40, 40), 1);
+    text_box(dc, fs, "HOME + D-PAD: UP keyboard, RIGHT controller, DOWN desktop, LEFT off", WUPSTREAM_W / 2, WUPSTREAM_H - 94, RGB(40, 40, 40), 1);
+    text_box(dc, fs, "HOME + X = on-screen keyboard", WUPSTREAM_W / 2, WUPSTREAM_H - 66, RGB(40, 40, 40), 1);
 }
 
 /* ---------------- the streaming thread ---------------- */
@@ -478,7 +571,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
         wupstream_input_t in; int tick = 0; DWORD t0 = GetTickCount(); int frames = 0;
         uint32_t cyclemod_prev = 0;      /* +/- state last tick, for edge-detecting the profile-cycle combo */
         uint32_t chordheld = 0;          /* +/- buttons used in a combo: swallowed until released */
-        int homeheld = 0, chord = 0, shown = -1;
+        int homeheld = 0, chord = 0, shown = -1; uint32_t dpad_prev = 0, xprev = 0;
         DWORD hometap_until = 0, banner_until = 0, rumble_off = 0;
         while (g_run && wupstream_input(pad, &in) == 0) {
             DWORD now = GetTickCount();
@@ -494,23 +587,34 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
                 PostMessage(g_win, WM_SETMODE, (WPARAM)next, 0);
                 chord = 1; chordheld |= cyclemod;
             }
+            uint32_t dmod = raw & (WUPSTREAM_UP | WUPSTREAM_DOWN | WUPSTREAM_LEFT | WUPSTREAM_RIGHT);
+            if (home && dmod && !(dpad_prev & dmod)) {       /* HOME + D-pad picks a mode directly */
+                int next = (dmod & WUPSTREAM_UP) ? MODE_KM : (dmod & WUPSTREAM_RIGHT) ? MODE_PAD : (dmod & WUPSTREAM_DOWN) ? MODE_DESK : MODE_OFF;
+                g_mode = next;
+                PostMessage(g_win, WM_SETMODE, (WPARAM)next, 0);
+                chord = 1; chordheld |= dmod;
+            }
+            dpad_prev = home ? dmod : 0;
+            uint32_t xmod = raw & WUPSTREAM_X;
+            if (home && xmod && !xprev) { g_osk = !g_osk; chord = 1; chordheld |= xmod; }     /* HOME + X: on-screen keyboard */
+            xprev = home ? xmod : 0;
             cyclemod_prev = home ? cyclemod : 0;
             if (home) homeheld = 1;
             else { if (homeheld && !chord) hometap_until = now + 80; homeheld = 0; chord = 0; }
             chordheld &= raw;
             in.buttons &= ~chordheld;
-            if (home) in.buttons &= ~(WUPSTREAM_HOME | WUPSTREAM_PLUS | WUPSTREAM_MINUS);
+            if (home) { in.buttons = 0; in.lx = in.ly = in.rx = in.ry = 0; }      /* HOME is an fn key: nothing else reaches the game while it is held */
             else if ((int)(hometap_until - now) > 0) in.buttons |= WUPSTREAM_HOME;
 
             int mode = (int)g_mode;
             if (mode != shown) {         /* mode changed (or first frame): banner, and a short buzz as confirmation */
-                banner_until = now + 2500;
+                banner_until = now + 1500;
                 if (shown != -1) { wupstream_rumble(pad, 1); rumble_off = now + 200; }
                 shown = mode;
             }
-            if (rumble_off && (int)(now - rumble_off) >= 0) { if (mode != MODE_PAD) wupstream_rumble(pad, 0); rumble_off = 0; }
+            if (rumble_off && (int)(now - rumble_off) >= 0) { wupstream_rumble(pad, mode == MODE_PAD ? (int)g_gamerumble : 0); rumble_off = 0; }
             if (mode == MODE_PAD) { if (!g_pad) pad_open(); } else if (g_pad) pad_close();
-            if (mode != MODE_OFF) apply_input(&in, mode); else if (g_prev || g_prevtouch) release_all();
+            if (mode != MODE_OFF) apply_input(&in, mode); else if (g_prev || g_prevtouch || osk_busy()) release_all();
 
             if (!usegdi) {
                 if (d.dup) {
@@ -539,7 +643,8 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
                 memcpy(px, g_scene, sizeof g_scene);
                 if (g_drawptr) draw_cursor_small(small);
             }
-            draw_overlay(small, fs, fl, mode, (int)(banner_until - now) > 0);
+            if (mode != MODE_OFF) draw_osk(small, fs);
+            draw_overlay(small, fs, fl, mode, home || (int)(banner_until - now) > 0);
             GdiFlush();
             if (wupstream_frame(pad, px, WUPSTREAM_W * 4, WUPSTREAM_BGRA)) break;
             frames++;
@@ -586,6 +691,8 @@ static void save_cfg(void) {
     WritePrivateProfileStringA("wup", "pointer", SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
     snprintf(v, sizeof v, "%d", (int)g_mode);
     WritePrivateProfileStringA("wup", "mode", v, g_ini);
+    snprintf(v, sizeof v, "%d", (int)g_looksens); WritePrivateProfileStringA("wup", "look", v, g_ini);
+    snprintf(v, sizeof v, "%d", (int)g_decksens); WritePrivateProfileStringA("wup", "cursor", v, g_ini);
 }
 static void load_cfg(void) {
     char ip[64];
@@ -596,6 +703,8 @@ static void load_cfg(void) {
     SendMessage(g_audio, BM_SETCHECK, GetPrivateProfileIntA("wup", "audio", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     int p = GetPrivateProfileIntA("wup", "pointer", 1, g_ini);
     SendMessage(g_ptr, BM_SETCHECK, p ? BST_CHECKED : BST_UNCHECKED, 0); g_drawptr = p;
+    g_looksens = GetPrivateProfileIntA("wup", "look", 12, g_ini);        /* 1-100: right-stick mouse look speed */
+    g_decksens = GetPrivateProfileIntA("wup", "cursor", 9, g_ini);         /* 1-100: left-stick desktop cursor speed */
     int m = GetPrivateProfileIntA("wup", "mode", 0, g_ini);
     if (m < 0 || m > 3) m = 0;
     g_mode = m; SendMessage(g_ctrl, CB_SETCURSEL, (WPARAM)m, 0); SetWindowTextA(g_help, HELP[m]);
