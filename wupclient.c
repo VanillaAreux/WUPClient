@@ -122,7 +122,7 @@ done:
  *      A Space, B Ctrl (crouch), X E, Y R, L Q, R F, L3 Shift (sprint), R3 V (melee), D-pad = 1 2 3 4,
  *      + Esc, - Tab, HOME Enter. The touch screen is still a mouse (menus).
  *  Controller (Xbox 360): a virtual Xbox 360 pad (needs the ViGEmBus driver). Face buttons by position (the GamePad's bottom
- *      button is Xbox A), ZL/ZR = triggers, L/R = bumpers, sticks, D-pad, + Start, - Back, HOME Guide. Rumble comes back to the pad.
+ *      button is Xbox A), ZL/ZR = triggers, L/R = bumpers, sticks, D-pad, + Start, - Back, HOME = Esc key (pause in any game). Rumble comes back to the pad.
  *  Desktop: touch = mouse, left stick = mouse, right stick = scroll, ZR/ZL/L3 = clicks, D-pad = arrows, A Enter, B Esc, X Space,
  *      Y Tab, - Backspace, + Windows key, L/R browser back/forward, HOME play/pause, R3 mute.
  *  Off. */
@@ -147,6 +147,7 @@ static const keymap KM_KEYS[] = {
     { WUPSTREAM_PLUS, VK_ESCAPE, 1, 0 }, { WUPSTREAM_MINUS, VK_TAB, 1, 0 }, { WUPSTREAM_HOME, VK_RETURN, 1, 0 },
 };
 static const keymap NO_KEYS[1] = { { 0, 0, 0, 0 } };
+static const keymap PAD_KEYS[] = { { WUPSTREAM_HOME, VK_ESCAPE, 1, 0 } };   /* Controller mode: tap HOME = Esc (pause/back in any game) */
 #define NDESK (sizeof DESK_KEYS / sizeof *DESK_KEYS)
 #define NKM (sizeof KM_KEYS / sizeof *KM_KEYS)
 typedef struct { uint32_t mask; DWORD down, up; } mousemap;
@@ -218,7 +219,6 @@ static void pad_update(const wupstream_input_t *in) {
     if (b & WUPSTREAM_R) w |= XUSB_GAMEPAD_RIGHT_SHOULDER;
     if (b & WUPSTREAM_PLUS) w |= XUSB_GAMEPAD_START;
     if (b & WUPSTREAM_MINUS) w |= XUSB_GAMEPAD_BACK;
-    if (b & WUPSTREAM_HOME) w |= XUSB_GAMEPAD_GUIDE;
     if (b & WUPSTREAM_L3) w |= XUSB_GAMEPAD_LEFT_THUMB;
     if (b & WUPSTREAM_R3) w |= XUSB_GAMEPAD_RIGHT_THUMB;
     XUSB_REPORT r; memset(&r, 0, sizeof r);
@@ -252,14 +252,14 @@ static void release_all(void) {
 }
 
 static void apply_input(const wupstream_input_t *in, int mode) {
-    const keymap *tab = mode == MODE_KM ? KM_KEYS : mode == MODE_DESK ? DESK_KEYS : NO_KEYS;
+    const keymap *tab = mode == MODE_KM ? KM_KEYS : mode == MODE_DESK ? DESK_KEYS : mode == MODE_PAD ? PAD_KEYS : NO_KEYS;
     if (tab != g_tab) {                              /* the mode changed: let go of everything the old one held */
         release_all();
-        g_tab = tab; g_ntab = mode == MODE_KM ? NKM : mode == MODE_DESK ? NDESK : 0;
+        g_tab = tab; g_ntab = mode == MODE_KM ? NKM : mode == MODE_DESK ? NDESK : mode == MODE_PAD ? 1 : 0;
         g_clk = mode == MODE_KM ? KM_CLICKS : DESK_CLICKS; g_nclk = mode == MODE_KM ? 2 : mode == MODE_DESK ? 3 : 0;
     }
     uint32_t b = in->buttons;
-    if (mode == MODE_PAD) { pad_update(in); b = 0; }
+    if (mode == MODE_PAD) { pad_update(in); b &= WUPSTREAM_HOME; }
     else if (mode == MODE_KM) {                      /* the left stick is W A S D */
         if (in->ly > 450) b |= VW;
         if (in->ly < -450) b |= VS;
@@ -412,6 +412,31 @@ static void draw_cursor_small(HDC dc) {
     if (ii.hbmColor) DeleteObject(ii.hbmColor);
 }
 
+/* ---------------- on-screen mode indicator ----------------
+ * A small badge in the corner of the GamePad always names the active control mode; a big banner appears for a couple
+ * of seconds whenever the mode changes (from the GamePad combo or the PC window). */
+static const char *SHORT_NAMES[4] = { "KEYBOARD + MOUSE", "CONTROLLER", "DESKTOP", "INPUT OFF" };
+static const COLORREF MODE_COL[4] = { RGB(30, 110, 210), RGB(30, 150, 60), RGB(200, 120, 10), RGB(150, 40, 40) };
+static void text_box(HDC dc, HFONT f, const char *t, int x, int y, COLORREF bg, int center) {
+    HGDIOBJ old = SelectObject(dc, f);
+    SIZE sz; GetTextExtentPoint32A(dc, t, (int)strlen(t), &sz);
+    int pad = 6;
+    if (center) x -= (sz.cx + 2 * pad) / 2;
+    RECT r = { x, y, x + sz.cx + 2 * pad, y + sz.cy + pad };
+    HBRUSH b = CreateSolidBrush(bg); FillRect(dc, &r, b); DeleteObject(b);
+    SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(255, 255, 255));
+    TextOutA(dc, x + pad, y + pad / 2, t, (int)strlen(t));
+    SelectObject(dc, old);
+}
+static void draw_overlay(HDC dc, HFONT fs, HFONT fl, int mode, int banner) {
+    if (mode < 0 || mode > 3) return;
+    text_box(dc, fs, SHORT_NAMES[mode], 6, 6, MODE_COL[mode], 0);
+    if (banner) {
+        text_box(dc, fl, SHORT_NAMES[mode], WUPSTREAM_W / 2, WUPSTREAM_H - 110, MODE_COL[mode], 1);
+        text_box(dc, fs, "HOME + PLUS / MINUS = switch mode", WUPSTREAM_W / 2, WUPSTREAM_H - 56, RGB(40, 40, 40), 1);
+    }
+}
+
 /* ---------------- the streaming thread ---------------- */
 static uint32_t g_scene[WUPSTREAM_W * WUPSTREAM_H];
 static DWORD WINAPI stream_thread(LPVOID unused) {
@@ -433,6 +458,8 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
     SetStretchBltMode(small, HALFTONE); SetBrushOrgEx(small, 0, 0, NULL);
     RECT all = {0, 0, WUPSTREAM_W, WUPSTREAM_H};
 
+    HFONT fs = CreateFontA(-16, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
+    HFONT fl = CreateFontA(-38, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, ANTIALIASED_QUALITY, 0, "Segoe UI");
     dda d; int usegdi = !dda_open(&d); DWORD lastretry = 0;
     geometry(usegdi ? gsw : d.w, usegdi ? gsh : d.h);
     memset(g_scene, 0, sizeof g_scene);
@@ -450,18 +477,38 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
         g_curpad = pad;
         wupstream_input_t in; int tick = 0; DWORD t0 = GetTickCount(); int frames = 0;
         uint32_t cyclemod_prev = 0;      /* +/- state last tick, for edge-detecting the profile-cycle combo */
+        uint32_t chordheld = 0;          /* +/- buttons used in a combo: swallowed until released */
+        int homeheld = 0, chord = 0, shown = -1;
+        DWORD hometap_until = 0, banner_until = 0, rumble_off = 0;
         while (g_run && wupstream_input(pad, &in) == 0) {
-            /* HOME + PLUS/MINUS cycles the control profile without touching the keyboard: hold HOME and tap
-             * PLUS to go forward or MINUS to go back. Edge-triggered on PLUS/MINUS so holding both doesn't repeat. */
-            uint32_t cyclemod = in.buttons & (WUPSTREAM_PLUS | WUPSTREAM_MINUS);
-            if ((in.buttons & WUPSTREAM_HOME) && cyclemod && !(cyclemod_prev & cyclemod)) {
+            DWORD now = GetTickCount();
+            /* HOME + PLUS/MINUS cycles the control profile: hold HOME and tap PLUS (next) or MINUS (previous).
+             * HOME itself is only sent on a clean tap (so the combo never fires Enter/Guide), and the +/- used in a
+             * combo are swallowed, so switching never presses anything in the game. */
+            uint32_t raw = in.buttons, cyclemod = raw & (WUPSTREAM_PLUS | WUPSTREAM_MINUS);
+            int home = (raw & WUPSTREAM_HOME) != 0;
+            if (home && cyclemod && !(cyclemod_prev & cyclemod)) {
                 int dir = (cyclemod & WUPSTREAM_PLUS) ? 1 : -1;
                 int next = ((int)g_mode + dir + 4) % 4;
+                g_mode = next;
                 PostMessage(g_win, WM_SETMODE, (WPARAM)next, 0);
+                chord = 1; chordheld |= cyclemod;
             }
-            cyclemod_prev = (in.buttons & WUPSTREAM_HOME) ? cyclemod : 0;
+            cyclemod_prev = home ? cyclemod : 0;
+            if (home) homeheld = 1;
+            else { if (homeheld && !chord) hometap_until = now + 80; homeheld = 0; chord = 0; }
+            chordheld &= raw;
+            in.buttons &= ~chordheld;
+            if (home) in.buttons &= ~(WUPSTREAM_HOME | WUPSTREAM_PLUS | WUPSTREAM_MINUS);
+            else if ((int)(hometap_until - now) > 0) in.buttons |= WUPSTREAM_HOME;
 
             int mode = (int)g_mode;
+            if (mode != shown) {         /* mode changed (or first frame): banner, and a short buzz as confirmation */
+                banner_until = now + 2500;
+                if (shown != -1) { wupstream_rumble(pad, 1); rumble_off = now + 200; }
+                shown = mode;
+            }
+            if (rumble_off && (int)(now - rumble_off) >= 0) { if (mode != MODE_PAD) wupstream_rumble(pad, 0); rumble_off = 0; }
             if (mode == MODE_PAD) { if (!g_pad) pad_open(); } else if (g_pad) pad_close();
             if (mode != MODE_OFF) apply_input(&in, mode); else if (g_prev || g_prevtouch) release_all();
 
@@ -492,6 +539,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
                 memcpy(px, g_scene, sizeof g_scene);
                 if (g_drawptr) draw_cursor_small(small);
             }
+            draw_overlay(small, fs, fl, mode, (int)(banner_until - now) > 0);
             GdiFlush();
             if (wupstream_frame(pad, px, WUPSTREAM_W * 4, WUPSTREAM_BGRA)) break;
             frames++;
@@ -509,6 +557,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
     }
     pad_shutdown();
     dda_close(&d);
+    DeleteObject(fs); DeleteObject(fl);
     DeleteObject(smallbmp); DeleteDC(small); DeleteObject(fullbmp); DeleteDC(full); ReleaseDC(NULL, scr);
     PostMessage(g_win, WM_STOPPED, 0, 0);
     return 0;
@@ -526,9 +575,36 @@ static const char *HELP[4] = {
     "The GamePad's controls are not sent to the PC.",
 };
 
+/* settings are remembered in wupclient.ini next to the exe */
+static char g_ini[MAX_PATH];
+static void save_cfg(void) {
+    char ip[64], v[16];
+    if (!g_ini[0]) return;
+    GetWindowTextA(g_ip, ip, sizeof ip);
+    WritePrivateProfileStringA("wup", "ip", ip, g_ini);
+    WritePrivateProfileStringA("wup", "audio", SendMessage(g_audio, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
+    WritePrivateProfileStringA("wup", "pointer", SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
+    snprintf(v, sizeof v, "%d", (int)g_mode);
+    WritePrivateProfileStringA("wup", "mode", v, g_ini);
+}
+static void load_cfg(void) {
+    char ip[64];
+    GetModuleFileNameA(NULL, g_ini, sizeof g_ini);
+    char *dot = strrchr(g_ini, '.'); if (dot) strcpy(dot, ".ini"); else strcat(g_ini, ".ini");
+    GetPrivateProfileStringA("wup", "ip", "", ip, sizeof ip, g_ini);
+    SetWindowTextA(g_ip, ip);
+    SendMessage(g_audio, BM_SETCHECK, GetPrivateProfileIntA("wup", "audio", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
+    int p = GetPrivateProfileIntA("wup", "pointer", 1, g_ini);
+    SendMessage(g_ptr, BM_SETCHECK, p ? BST_CHECKED : BST_UNCHECKED, 0); g_drawptr = p;
+    int m = GetPrivateProfileIntA("wup", "mode", 0, g_ini);
+    if (m < 0 || m > 3) m = 0;
+    g_mode = m; SendMessage(g_ctrl, CB_SETCURSEL, (WPARAM)m, 0); SetWindowTextA(g_help, HELP[m]);
+}
+
 static void start(void) {
     GetWindowTextA(g_ip, g_ipstr, sizeof g_ipstr);
     g_useaudio = SendMessage(g_audio, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    save_cfg();
     g_run = 1;
     EnableWindow(g_ip, FALSE); EnableWindow(g_audio, FALSE);
     SetWindowTextA(g_btn, "Stop");
@@ -544,10 +620,10 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND:
         if (LOWORD(w) == ID_START) { if (g_run) stop(); else start(); }
-        else if (LOWORD(w) == ID_PTR) g_drawptr = SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        else if (LOWORD(w) == ID_PTR) { g_drawptr = SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED; save_cfg(); }
         else if (LOWORD(w) == ID_CTRL && HIWORD(w) == CBN_SELCHANGE) {
             int i = (int)SendMessage(g_ctrl, CB_GETCURSEL, 0, 0);
-            if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); }
+            if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); save_cfg(); }
         }
         return 0;
     case WM_STATUS: SetWindowTextA(g_status, (char *)l); free((void *)l); return 0;
@@ -557,6 +633,7 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_mode = i;
             SendMessage(g_ctrl, CB_SETCURSEL, (WPARAM)i, 0);
             SetWindowTextA(g_help, HELP[i]);
+            save_cfg();
             status("Control profile: %s (GamePad HOME + +/-)", MODE_NAMES[i]);
         }
         return 0;
@@ -612,6 +689,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     g_btn = mk("BUTTON", "Start streaming", BS_DEFPUSHBUTTON, 16, 178, 388, 38, (HMENU)ID_START, fb, inst);
     g_status = mk("STATIC", "Ready", 0, 16, 226, 388, 20, NULL, fb, inst);
     g_help = mk("STATIC", HELP[0], 0, 16, 256, 388, 130, NULL, f, inst);
+    load_cfg();
     ShowWindow(g_win, show); UpdateWindow(g_win);
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessage(&msg); }
