@@ -9,7 +9,7 @@ Built on [libwupstream](https://github.com/ravensclawx/wup-stream) (`host/`). Li
 - Windows 7 or later (64-bit build)
 - A Wii U running the **WUP Stream** homebrew app
 - PC and Wii U on the same Wi-Fi/LAN
-- *Optional:* [ViGEmBus](https://github.com/nefarius/ViGEmBus) driver, needed only for **Controller** mode
+- *Optional:* [ViGEmBus](https://github.com/nefarius/ViGEmBus) driver, needed only for **Controller** mode. The app offers to download and install it for you the first time you use that mode (needs internet and an admin approval).
 
 ## Quick start
 
@@ -146,7 +146,7 @@ Lower is slower. Restart the app after editing. The file is created the first ti
 
 - **"Looking for a GamePad..." never ends:** make sure WUP Stream is open on the Wii U, both devices are on the same network, and try typing the GamePad's IP. Check that the Windows firewall allows the app.
 - **Two mouse pointers:** untick *Draw mouse pointer*.
-- **Controller mode does nothing:** install ViGEmBus and restart the client.
+- **Controller mode does nothing (for example in BeamNG):** the status line should say "virtual controller active". If it says the driver is missing, the app offers to download and install ViGEmBus when you pick Controller mode; click Yes and approve the Windows prompt. Then start the game *after* the stream is running in Controller mode and choose the Xbox 360 controller in the game's controls settings.
 - **Can't pause a game:** in Controller or Keyboard + mouse mode, try + or tap HOME (both can send Esc, depending on the mode). Or use the on-screen keyboard's Esc key.
 - **Don't know which mode you're in:** hold HOME and look at the GamePad screen.
 - **Mouse too fast or slow:** adjust `look` and `cursor` in `wupclient.ini`.
@@ -159,7 +159,7 @@ Source is `wupclient.c`. It needs `wupstream.h`, `libwupstream.a` (libwupstream 
 
 **MSYS2 UCRT64 (as the source header says):** build libwupstream with `host/build.sh` from the wup-stream repo, then link `wupclient.c` against `libwupstream.a`, the ViGEmClient sources, and:
 
-`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lpthread -lm`
+`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lpthread -lm`
 
 **Linux cross-compile (MinGW-w64):**
 

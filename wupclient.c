@@ -10,6 +10,8 @@
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <shellapi.h>
+#include <urlmon.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,7 @@
 #define ID_PTR   105
 #define WM_STATUS (WM_APP + 1)
 #define WM_STOPPED (WM_APP + 2)
+#define WM_NEEDDRIVER (WM_APP + 4)   /* the ViGEmBus driver is missing: offer to install it */
 #define WM_SETMODE (WM_APP + 3)   /* wParam = new MODE_*, sent from the stream thread when the GamePad cycles profiles */
 
 static const GUID MY_CLSID_Enum = {0xBCDE0395,0xE52F,0x467C,{0x8E,0x3D,0xC4,0x57,0x92,0x91,0x69,0x2E}};
@@ -171,6 +174,7 @@ static volatile LONG g_mode;                         /* MODE_* */
 
 /* the virtual Xbox 360 controller (ViGEmBus) */
 static PVIGEM_CLIENT g_vg; static PVIGEM_TARGET g_pad; static DWORD g_vgtry;
+static volatile LONG g_vgasked, g_vginstalling;      /* offered the driver install already / installer running */
 static wupstream *volatile g_curpad;                 /* the GamePad, for rumble */
 static XUSB_REPORT g_lastrep; static int g_haverep;
 static volatile LONG g_gamerumble;                   /* the game is asking for rumble */
@@ -186,7 +190,12 @@ static void pad_open(void) {
     if (!g_vg) {
         g_vg = vigem_alloc();
         if (!g_vg) return;
-        if (!VIGEM_SUCCESS(vigem_connect(g_vg))) { vigem_free(g_vg); g_vg = NULL; return; }
+        VIGEM_ERROR e = vigem_connect(g_vg);
+        if (!VIGEM_SUCCESS(e)) {
+            vigem_free(g_vg); g_vg = NULL;
+            if (e == VIGEM_ERROR_BUS_NOT_FOUND && !g_vginstalling && !g_vgasked) { g_vgasked = 1; PostMessage(g_win, WM_NEEDDRIVER, 0, 0); }
+            return;
+        }
     }
     PVIGEM_TARGET t = vigem_target_x360_alloc();
     if (!t) return;
@@ -651,7 +660,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
             if (++tick >= 60) {
                 DWORD t = GetTickCount();
                 status("Streaming - %.0f fps, GamePad battery %d%%%s%s", frames * 1000.0 / (t - t0 ? t - t0 : 1), in.battery, usegdi ? " (basic capture)" : "",
-                       (g_mode == MODE_PAD && !g_pad) ? " - controller driver missing: install ViGEmBus" : "");
+                       g_mode == MODE_PAD ? (g_pad ? " - virtual controller active" : " - controller driver missing: install ViGEmBus") : "");
                 tick = 0; frames = 0; t0 = t;
             }
         }
@@ -679,6 +688,42 @@ static const char *HELP[4] = {
     "Touch screen = mouse (drag to drag)\nLeft stick = move mouse, right stick = scroll\nZR = left click, ZL = right click, L3 = middle click\nD-pad = arrow keys, A Enter, B Esc, X Space, Y Tab\n- Backspace, + Windows key, L / R browser back / forward\nHOME = play/pause, R3 = mute",
     "The GamePad's controls are not sent to the PC.",
 };
+
+/* ---------------- fetch the controller driver (ViGEmBus) when it is missing ---------------- */
+#define VIGEM_URL "https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe"
+static int driver_present(void) {
+    PVIGEM_CLIENT c = vigem_alloc();
+    if (!c) return 0;
+    int ok = VIGEM_SUCCESS(vigem_connect(c));
+    if (ok) vigem_disconnect(c);
+    vigem_free(c);
+    return ok;
+}
+static DWORD WINAPI install_driver(LPVOID unused) {
+    (void)unused;
+    char tmp[MAX_PATH], exe[MAX_PATH];
+    GetTempPathA(sizeof tmp, tmp); snprintf(exe, sizeof exe, "%sViGEmBus_setup.exe", tmp);
+    status("Downloading the ViGEmBus controller driver...");
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    int got = URLDownloadToFileA(NULL, VIGEM_URL, exe, 0, NULL) == S_OK && GetFileAttributesExA(exe, GetFileExInfoStandard, &fa) && fa.nFileSizeLow > 500000;
+    if (!got) {
+        DeleteFileA(exe);
+        status("Could not download ViGEmBus - install it from github.com/nefarius/ViGEmBus/releases");
+    } else {
+        status("Installing ViGEmBus - click Yes on the Windows prompt, then finish its installer...");
+        SHELLEXECUTEINFOA se; memset(&se, 0, sizeof se);
+        se.cbSize = sizeof se; se.fMask = SEE_MASK_NOCLOSEPROCESS; se.lpVerb = "runas"; se.lpFile = exe; se.nShow = SW_SHOWNORMAL;
+        if (ShellExecuteExA(&se) && se.hProcess) { WaitForSingleObject(se.hProcess, 10 * 60 * 1000); CloseHandle(se.hProcess); }
+        DeleteFileA(exe);
+        status(driver_present() ? "ViGEmBus installed - Controller mode is ready" : "ViGEmBus is not active yet - finish its installer (a restart may be needed)");
+    }
+    g_vgtry = 0; g_vginstalling = 0;
+    return 0;
+}
+/* Controller mode was picked: if the driver is missing, offer to fetch it (once per start) */
+static void check_driver(int mode) {
+    if (mode == MODE_PAD && !g_vginstalling && !g_vgasked && !driver_present()) { g_vgasked = 1; PostMessage(g_win, WM_NEEDDRIVER, 0, 0); }
+}
 
 /* settings are remembered in wupclient.ini next to the exe */
 static char g_ini[MAX_PATH];
@@ -714,6 +759,7 @@ static void start(void) {
     GetWindowTextA(g_ip, g_ipstr, sizeof g_ipstr);
     g_useaudio = SendMessage(g_audio, BM_GETCHECK, 0, 0) == BST_CHECKED;
     save_cfg();
+    g_vgasked = 0;
     g_run = 1;
     EnableWindow(g_ip, FALSE); EnableWindow(g_audio, FALSE);
     SetWindowTextA(g_btn, "Stop");
@@ -732,7 +778,15 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         else if (LOWORD(w) == ID_PTR) { g_drawptr = SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED; save_cfg(); }
         else if (LOWORD(w) == ID_CTRL && HIWORD(w) == CBN_SELCHANGE) {
             int i = (int)SendMessage(g_ctrl, CB_GETCURSEL, 0, 0);
-            if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); save_cfg(); }
+            if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); save_cfg(); check_driver(i); }
+        }
+        return 0;
+    case WM_NEEDDRIVER:
+        if (MessageBoxA(h, "Controller mode needs the free ViGEmBus driver, and it is not installed.\n\nDownload and install it now? (Windows will ask for permission.)",
+                        "WUP Stream Client", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            g_vginstalling = 1;
+            HANDLE t = CreateThread(NULL, 0, install_driver, NULL, 0, NULL);
+            if (t) CloseHandle(t); else g_vginstalling = 0;
         }
         return 0;
     case WM_STATUS: SetWindowTextA(g_status, (char *)l); free((void *)l); return 0;
@@ -742,7 +796,7 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             g_mode = i;
             SendMessage(g_ctrl, CB_SETCURSEL, (WPARAM)i, 0);
             SetWindowTextA(g_help, HELP[i]);
-            save_cfg();
+            save_cfg(); check_driver(i);
             status("Control profile: %s (GamePad HOME + +/-)", MODE_NAMES[i]);
         }
         return 0;
