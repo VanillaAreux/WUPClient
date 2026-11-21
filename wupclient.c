@@ -20,15 +20,18 @@
 #define ID_AUDIO 102
 #define ID_IP    103
 #define ID_CTRL  104
+#define ID_PTR   105
 #define WM_STATUS (WM_APP + 1)
 #define WM_STOPPED (WM_APP + 2)
+#define WM_SETMODE (WM_APP + 3)   /* wParam = new MODE_*, sent from the stream thread when the GamePad cycles profiles */
 
 static const GUID MY_CLSID_Enum = {0xBCDE0395,0xE52F,0x467C,{0x8E,0x3D,0xC4,0x57,0x92,0x91,0x69,0x2E}};
 static const GUID MY_IID_Enum   = {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D,0xB6,0x36,0x17,0xE6}};
 static const GUID MY_IID_Client = {0x1CB9AD4C,0xDBFA,0x4C32,{0xB1,0x78,0xC2,0xF5,0x68,0xA7,0x03,0xB2}};
 static const GUID MY_IID_Capture= {0xC8ADBD64,0xE71E,0x48A0,{0xA4,0xDE,0x18,0x5C,0x39,0x5C,0xD3,0x17}};
 
-static HWND g_win, g_btn, g_audio, g_ip, g_status, g_ctrl;
+static HWND g_win, g_btn, g_audio, g_ip, g_status, g_ctrl, g_ptr;
+static volatile LONG g_drawptr = 1;   /* draw our own mouse pointer on the frame (off if the capture already contains one) */
 static volatile LONG g_run;         /* 1 while the user wants streaming */
 static HANDLE g_thread;
 static char g_ipstr[64];
@@ -446,7 +449,18 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
 
         g_curpad = pad;
         wupstream_input_t in; int tick = 0; DWORD t0 = GetTickCount(); int frames = 0;
+        uint32_t cyclemod_prev = 0;      /* +/- state last tick, for edge-detecting the profile-cycle combo */
         while (g_run && wupstream_input(pad, &in) == 0) {
+            /* HOME + PLUS/MINUS cycles the control profile without touching the keyboard: hold HOME and tap
+             * PLUS to go forward or MINUS to go back. Edge-triggered on PLUS/MINUS so holding both doesn't repeat. */
+            uint32_t cyclemod = in.buttons & (WUPSTREAM_PLUS | WUPSTREAM_MINUS);
+            if ((in.buttons & WUPSTREAM_HOME) && cyclemod && !(cyclemod_prev & cyclemod)) {
+                int dir = (cyclemod & WUPSTREAM_PLUS) ? 1 : -1;
+                int next = ((int)g_mode + dir + 4) % 4;
+                PostMessage(g_win, WM_SETMODE, (WPARAM)next, 0);
+            }
+            cyclemod_prev = (in.buttons & WUPSTREAM_HOME) ? cyclemod : 0;
+
             int mode = (int)g_mode;
             if (mode == MODE_PAD) { if (!g_pad) pad_open(); } else if (g_pad) pad_close();
             if (mode != MODE_OFF) apply_input(&in, mode); else if (g_prev || g_prevtouch) release_all();
@@ -464,7 +478,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
             if (usegdi) {
                 BitBlt(full, 0, 0, gsw, gsh, scr, 0, 0, SRCCOPY | CAPTUREBLT);
                 CURSORINFO ci = { sizeof ci };
-                if (GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING)) {
+                if (g_drawptr && GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING)) {
                     ICONINFO ii;
                     if (GetIconInfo(ci.hCursor, &ii)) {
                         DrawIconEx(full, ci.ptScreenPos.x - ii.xHotspot, ci.ptScreenPos.y - ii.yHotspot, ci.hCursor, 0, 0, 0, NULL, DI_NORMAL);
@@ -476,7 +490,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
                 StretchBlt(small, g_dx, g_dy, g_dw, g_dh, full, 0, 0, gsw, gsh, SRCCOPY);
             } else {
                 memcpy(px, g_scene, sizeof g_scene);
-                draw_cursor_small(small);
+                if (g_drawptr) draw_cursor_small(small);
             }
             GdiFlush();
             if (wupstream_frame(pad, px, WUPSTREAM_W * 4, WUPSTREAM_BGRA)) break;
@@ -504,6 +518,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
 static int g_dpi = 96;
 #define S(x) MulDiv((x), g_dpi, 96)
 static HWND g_help;
+static const char *MODE_NAMES[4] = { "Keyboard + mouse", "Controller", "Desktop", "Off" };
 static const char *HELP[4] = {
     "Left stick = W A S D, right stick = mouse look\nZR = fire (left click), ZL = aim (right click)\nA Space, B Ctrl, X E, Y R, L Q, R F\nL3 Shift (sprint), R3 V, D-pad = 1 2 3 4\n+ Esc, - Tab, HOME Enter\nTouch screen = mouse (for menus)",
     "Acts as an Xbox 360 controller in your games. Needs the free ViGEmBus driver installed (github.com/nefarius/ViGEmBus). Buttons match by position (bottom button = Xbox A), ZL/ZR are the triggers, and game rumble is sent to the GamePad. The touch screen still works as a mouse.",
@@ -529,12 +544,23 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_COMMAND:
         if (LOWORD(w) == ID_START) { if (g_run) stop(); else start(); }
+        else if (LOWORD(w) == ID_PTR) g_drawptr = SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED;
         else if (LOWORD(w) == ID_CTRL && HIWORD(w) == CBN_SELCHANGE) {
             int i = (int)SendMessage(g_ctrl, CB_GETCURSEL, 0, 0);
             if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); }
         }
         return 0;
     case WM_STATUS: SetWindowTextA(g_status, (char *)l); free((void *)l); return 0;
+    case WM_SETMODE: {
+        int i = (int)w;
+        if (i >= 0 && i < 4) {
+            g_mode = i;
+            SendMessage(g_ctrl, CB_SETCURSEL, (WPARAM)i, 0);
+            SetWindowTextA(g_help, HELP[i]);
+            status("Control profile: %s (GamePad HOME + +/-)", MODE_NAMES[i]);
+        }
+        return 0;
+    }
     case WM_STOPPED:
         if (g_thread) { WaitForSingleObject(g_thread, 5000); CloseHandle(g_thread); g_thread = NULL; }
         SetWindowTextA(g_btn, "Start streaming"); EnableWindow(g_btn, TRUE);
@@ -572,7 +598,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     mk("STATIC", "Mirror this PC's screen and sound to your Wii U GamePad.\nOpen \"WUP Stream\" on the GamePad first (same Wi-Fi).", 0, 16, 12, 388, 36, NULL, f, inst);
     mk("STATIC", "GamePad IP (leave empty to auto-detect)", 0, 16, 58, 388, 18, NULL, f, inst);
     g_ip = mk("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 16, 78, 388, 24, (HMENU)ID_IP, f, inst);
-    g_audio = mk("BUTTON", "Stream PC sound to the GamePad", BS_AUTOCHECKBOX, 16, 112, 388, 22, (HMENU)ID_AUDIO, f, inst);
+    g_audio = mk("BUTTON", "Stream PC sound", BS_AUTOCHECKBOX, 16, 112, 150, 22, (HMENU)ID_AUDIO, f, inst);
+    g_ptr = mk("BUTTON", "Draw mouse pointer (untick if you see two)", BS_AUTOCHECKBOX, 170, 112, 234, 22, (HMENU)ID_PTR, f, inst);
+    SendMessage(g_ptr, BM_SETCHECK, BST_CHECKED, 0);
     SendMessage(g_audio, BM_SETCHECK, BST_CHECKED, 0);
     mk("STATIC", "GamePad controls:", 0, 16, 146, 110, 22, NULL, f, inst);
     g_ctrl = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 126, 142, 278, 120, (HMENU)ID_CTRL, f, inst);
