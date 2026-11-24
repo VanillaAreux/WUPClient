@@ -26,7 +26,7 @@
 #include "ViGEm/Client.h"
 
 static HWND g_win;
-#define WUPCLIENT_VERSION "2.2.0"
+#define WUPCLIENT_VERSION "2.3.0"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
@@ -144,7 +144,95 @@ static char g_ipstr[64];
 static int g_useaudio;
 static volatile LONG g_settings_menu, g_mic_enabled;
 static volatile LONG g_stream_kbps = 4500;
+static volatile LONG g_cable_setup_running;
 static int g_settings_sel;
+
+#define VBCABLE_URL "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip"
+
+/* Check for VB-CABLE's playback endpoint before offering installation. */
+static int vbcable_installed(void) {
+    HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator *en = NULL; IMMDeviceCollection *devices = NULL;
+    int found = 0;
+    if (FAILED(CoCreateInstance(&MY_CLSID_Enum, NULL, CLSCTX_ALL, &MY_IID_Enum, (void **)&en))) goto done;
+    if (FAILED(IMMDeviceEnumerator_EnumAudioEndpoints(en, eRender, DEVICE_STATE_ACTIVE, &devices))) goto done;
+    UINT count = 0; IMMDeviceCollection_GetCount(devices, &count);
+    for (UINT i = 0; i < count && !found; i++) {
+        IMMDevice *dev = NULL; IPropertyStore *store = NULL; PROPVARIANT name;
+        PropVariantInit(&name);
+        if (SUCCEEDED(IMMDeviceCollection_Item(devices, i, &dev)) &&
+            SUCCEEDED(IMMDevice_OpenPropertyStore(dev, STGM_READ, &store)) &&
+            SUCCEEDED(IPropertyStore_GetValue(store, &PKEY_Device_FriendlyName, &name)) && name.vt == VT_LPWSTR) {
+            WCHAR lower[256]; wcsncpy(lower, name.pwszVal, 255); lower[255] = 0;
+            CharLowerBuffW(lower, (DWORD)wcslen(lower));
+            found = wcsstr(lower, L"cable input") != NULL;
+        }
+        PropVariantClear(&name);
+        if (store) IPropertyStore_Release(store);
+        if (dev) IMMDevice_Release(dev);
+    }
+done:
+    if (devices) IMMDeviceCollection_Release(devices);
+    if (en) IMMDeviceEnumerator_Release(en);
+    if (SUCCEEDED(co)) CoUninitialize();
+    return found;
+}
+
+static DWORD WINAPI install_vbcable_thread(LPVOID unused) {
+    (void)unused;
+    if (vbcable_installed()) {
+        status("VB-CABLE is already installed.");
+        InterlockedExchange(&g_cable_setup_running, 0);
+        return 0;
+    }
+    char tmp[MAX_PATH], script[MAX_PATH];
+    if (!GetTempPathA(sizeof tmp, tmp) || FAILED(StringCchPrintfA(script, MAX_PATH, "%sWUPClient_VBCABLE_Setup.ps1", tmp))) {
+        status("Could not prepare VB-CABLE setup.");
+        InterlockedExchange(&g_cable_setup_running, 0);
+        return 0;
+    }
+    const char *ps =
+        "$ErrorActionPreference = 'Stop'\r\n"
+        "$ProgressPreference = 'SilentlyContinue'\r\n"
+        "$zip = Join-Path $env:TEMP 'WUPClient_VBCABLE_Driver_Pack46.zip'\r\n"
+        "$dir = Join-Path $env:TEMP 'WUPClient_VBCABLE_Driver_Pack46'\r\n"
+        "Invoke-WebRequest -UseBasicParsing -Uri '" VBCABLE_URL "' -OutFile $zip\r\n"
+        "if (Test-Path $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }\r\n"
+        "Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force\r\n"
+        "$setup = Get-ChildItem -LiteralPath $dir -Filter 'VBCABLE_Setup_x64.exe' -Recurse | Select-Object -First 1\r\n"
+        "if (-not $setup) { throw 'The VB-CABLE x64 setup program was not found in the official package.' }\r\n"
+        "Start-Process -FilePath $setup.FullName -Verb RunAs -Wait\r\n";
+    HANDLE file = CreateFileA(script, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        status("Could not create VB-CABLE setup script.");
+        InterlockedExchange(&g_cable_setup_running, 0);
+        return 0;
+    }
+    DWORD written = 0; BOOL wrote = WriteFile(file, ps, (DWORD)strlen(ps), &written, NULL);
+    CloseHandle(file);
+    if (!wrote || written != strlen(ps)) {
+        status("Could not write VB-CABLE setup script.");
+        InterlockedExchange(&g_cable_setup_running, 0);
+        return 0;
+    }
+    char params[MAX_PATH + 100];
+    StringCchPrintfA(params, sizeof params, "-NoProfile -ExecutionPolicy Bypass -File \"%s\"", script);
+    SHELLEXECUTEINFOA sei; ZeroMemory(&sei, sizeof sei);
+    sei.cbSize = sizeof sei; sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = "open"; sei.lpFile = "powershell.exe"; sei.lpParameters = params;
+    sei.nShow = SW_HIDE;
+    status("Downloading official VB-CABLE package. Windows will ask before installing the driver...");
+    if (!ShellExecuteExA(&sei) || !sei.hProcess) {
+        status("Could not start VB-CABLE setup. Check PowerShell and Windows permissions.");
+    } else {
+        WaitForSingleObject(sei.hProcess, INFINITE);
+        DWORD code = 1; GetExitCodeProcess(sei.hProcess, &code); CloseHandle(sei.hProcess);
+        if (code == 0) status("VB-CABLE setup finished. Follow its prompts, then restart Windows if requested.");
+        else status("VB-CABLE setup did not complete. Check the installer window and try again.");
+    }
+    InterlockedExchange(&g_cable_setup_running, 0);
+    return 0;
+}
 
 static void status(const char *fmt, ...) {
     char buf[200]; va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
@@ -723,26 +811,27 @@ static void draw_overlay(HDC dc, HFONT fs, HFONT fl, int mode, int show) {      
     text_box(dc, fs, "HOME + X = keyboard | HOME + Y = settings", WUPSTREAM_W / 2, WUPSTREAM_H - 66, RGB(40, 40, 40), 1);
 }
 static void draw_settings_menu(HDC dc, HFONT f) {
-    static const char *names[5] = { "GamePad microphone", "Stream quality", "Draw mouse pointer", "Control mode", "Close settings" };
+    static const char *names[7] = { "GamePad microphone", "Stream quality", "Draw mouse pointer", "Control mode", "Disconnect GamePad", "Set up VB-CABLE", "Close settings" };
     char line[96];
     RECT bg = { 70, 70, WUPSTREAM_W - 70, WUPSTREAM_H - 70 };
     HBRUSH b = CreateSolidBrush(RGB(18, 22, 30)); FillRect(dc, &bg, b); DeleteObject(b);
     text_box(dc, f, "WUP STREAM SETTINGS", WUPSTREAM_W / 2, 88, RGB(34, 78, 130), 1);
     HGDIOBJ old = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT);
-    for (int i = 0; i < 5; i++) {
-        RECT r = { 112, 136 + i * 42, WUPSTREAM_W - 112, 172 + i * 42 };
+    for (int i = 0; i < 7; i++) {
+        RECT r = { 112, 112 + i * 35, WUPSTREAM_W - 112, 143 + i * 35 };
         b = CreateSolidBrush(i == g_settings_sel ? RGB(38, 105, 180) : RGB(48, 54, 64));
         FillRect(dc, &r, b); DeleteObject(b);
         SetTextColor(dc, RGB(255,255,255));
         const char *value = i == 0 ? (g_mic_enabled ? "ON" : "OFF") :
             i == 1 ? (g_stream_kbps <= 3500 ? "LOW (3.5 Mbps)" : "BALANCED (4.5 Mbps)") :
             i == 2 ? (g_drawptr ? "ON" : "OFF") :
-            i == 3 ? SHORT_NAMES[(int)g_mode] : "";
+            i == 3 ? SHORT_NAMES[(int)g_mode] :
+            i == 5 ? (g_cable_setup_running ? "WORKING..." : "DOWNLOAD + INSTALL") : "";
         snprintf(line, sizeof line, "%s%s%s", names[i], value[0] ? "  -  " : "", value);
         RECT t = r; DrawTextA(dc, line, -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
     SelectObject(dc, old);
-    text_box(dc, f, "UP/DOWN select   A change   B close", WUPSTREAM_W / 2, WUPSTREAM_H - 116, RGB(34, 78, 130), 1);
+    text_box(dc, f, "UP/DOWN select   A choose   B close", WUPSTREAM_W / 2, WUPSTREAM_H - 80, RGB(34, 78, 130), 1);
 }
 
 /* ---------------- the streaming thread ---------------- */
@@ -795,7 +884,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
         wupstream_input_t in; int tick = 0; DWORD t0 = GetTickCount(); int frames = 0;
         uint32_t cyclemod_prev = 0;      /* +/- state last tick, for edge-detecting the profile-cycle combo */
         uint32_t chordheld = 0;          /* +/- buttons used in a combo: swallowed until released */
-        int homeheld = 0, chord = 0, shown = -1; uint32_t dpad_prev = 0, xprev = 0, yprev = 0, settings_prev = 0;
+        int homeheld = 0, chord = 0, shown = -1, disconnect_requested = 0; uint32_t dpad_prev = 0, xprev = 0, yprev = 0, settings_prev = 0;
         DWORD hometap_until = 0, banner_until = 0, rumble_off = 0;
         while (g_run && wupstream_input(pad, &in) == 0) {
             DWORD now = GetTickCount();
@@ -829,20 +918,27 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
             yprev = home ? ymod : 0;
             if (g_settings_menu) {
                 uint32_t nav = raw & (WUPSTREAM_UP | WUPSTREAM_DOWN | WUPSTREAM_A | WUPSTREAM_B);
-                if ((nav & WUPSTREAM_UP) && !(settings_prev & WUPSTREAM_UP)) g_settings_sel = (g_settings_sel + 4) % 5;
-                if ((nav & WUPSTREAM_DOWN) && !(settings_prev & WUPSTREAM_DOWN)) g_settings_sel = (g_settings_sel + 1) % 5;
+                if ((nav & WUPSTREAM_UP) && !(settings_prev & WUPSTREAM_UP)) g_settings_sel = (g_settings_sel + 6) % 7;
+                if ((nav & WUPSTREAM_DOWN) && !(settings_prev & WUPSTREAM_DOWN)) g_settings_sel = (g_settings_sel + 1) % 7;
                 if ((nav & WUPSTREAM_A) && !(settings_prev & WUPSTREAM_A)) {
                     if (g_settings_sel == 0) g_mic_enabled = !g_mic_enabled;
                     else if (g_settings_sel == 1) g_stream_kbps = g_stream_kbps <= 3500 ? 4500 : 3500;
                     else if (g_settings_sel == 2) g_drawptr = !g_drawptr;
                     else if (g_settings_sel == 3) { int next = ((int)g_mode + 1) % 4; g_mode = next; PostMessage(g_win, WM_SETMODE, (WPARAM)next, 0); }
-                    else g_settings_menu = 0;
-                    if (g_settings_sel != 3 && g_settings_sel != 4) PostMessage(g_win, WM_SETTINGS_CHANGED, 0, 0);
+                    else if (g_settings_sel == 4) { disconnect_requested = 1; g_settings_menu = 0; }
+                    else if (g_settings_sel == 5) {
+                        if (InterlockedCompareExchange(&g_cable_setup_running, 1, 0) == 0) {
+                            HANDLE setup = CreateThread(NULL, 0, install_vbcable_thread, NULL, 0, NULL);
+                            if (setup) CloseHandle(setup); else { InterlockedExchange(&g_cable_setup_running, 0); status("Could not start VB-CABLE setup."); }
+                        }
+                    } else g_settings_menu = 0;
+                    if (g_settings_sel <= 3) PostMessage(g_win, WM_SETTINGS_CHANGED, 0, 0);
                 }
                 if ((nav & WUPSTREAM_B) && !(settings_prev & WUPSTREAM_B)) g_settings_menu = 0;
                 settings_prev = nav;
                 in.buttons = 0; in.lx = in.ly = in.rx = in.ry = 0; in.touched = 0;
             } else settings_prev = 0;
+            if (disconnect_requested) break;
             cyclemod_prev = home ? cyclemod : 0;
             if (home) homeheld = 1;
             else { if (homeheld && !chord) hometap_until = now + 80; homeheld = 0; chord = 0; }
@@ -905,7 +1001,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
         mstop = 1; if (mth) { WaitForSingleObject(mth, INFINITE); CloseHandle(mth); }
         astop = 1; if (ath) { WaitForSingleObject(ath, INFINITE); CloseHandle(ath); }
         wupstream_close(pad);
-        if (g_run) status("GamePad disconnected - reconnecting...");
+        if (g_run) status(disconnect_requested ? "GamePad disconnected. PC capture stays on; waiting for GamePad..." : "GamePad disconnected - reconnecting...");
     }
     pad_shutdown();
     dda_close(&d);
