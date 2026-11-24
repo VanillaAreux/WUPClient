@@ -144,7 +144,7 @@ When publishing a release, bump WUPCLIENT_VERSION in wupclient.c to the release'
 
 ## Remote game launching and Windows UAC
 
-Enter the full path to one game executable in the **Game executable** field before starting the stream. The path is saved in `wupclient.ini`. Hold **HOME** and tap **Y** on the GamePad to launch it. The game is started directly by WUPClient, not through the Windows desktop shell.
+Use **Browse...** to choose one game executable in the **Game executable** field before starting the stream. The path is saved in `wupclient.ini`. Hold **HOME** and tap **Y** on the GamePad to launch it. The game is started directly by WUPClient, not through the Windows desktop shell.
 
 For games whose executable requests administrator access, WUPClient must already be running elevated: close it, choose **Run as administrator**, approve that one UAC prompt locally, then reconnect the GamePad. The game inherits WUPClient's already-approved elevated token, avoiding a separate prompt for that launch. Only configure executables you trust.
 
@@ -174,7 +174,7 @@ Source is `wupclient.c`. It needs `wupstream.h`, `libwupstream.a` (libwupstream 
 
 **MSYS2 UCRT64 (as the source header says):** build libwupstream with `host/build.sh` from the wup-stream repo, then link `wupclient.c` against `libwupstream.a`, the ViGEmClient sources, and:
 
-`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lpthread -lm -lbcrypt`
+`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lcomdlg32 -lpthread -lm -lbcrypt`
 
 **Linux cross-compile (MinGW-w64):**
 
