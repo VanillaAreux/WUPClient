@@ -353,7 +353,7 @@ static DWORD WINAPI mic_thread(LPVOID p) {
             SUCCEEDED(IPropertyStore_GetValue(store, &PKEY_Device_FriendlyName, &name)) && name.vt == VT_LPWSTR) {
             WCHAR lower[256]; wcsncpy(lower, name.pwszVal, 255); lower[255] = 0;
             CharLowerBuffW(lower, (DWORD)wcslen(lower));
-            if (wcsstr(lower, L"cable input") || wcsstr(lower, L"vb-audio")) { dev = candidate; candidate = NULL; }
+            if (wcsstr(lower, L"cable input")) { dev = candidate; candidate = NULL; }
         }
         PropVariantClear(&name);
         if (store) IPropertyStore_Release(store);
@@ -390,8 +390,18 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         if (got <= 0) Sleep(3);
     }
     if (*a->stop) goto done;
+    if (fifo_count < 4800) {
+        status("GamePad mic: no audio received from the GamePad; check its mic/network connection");
+        goto done;
+    }
     if (FAILED(IAudioClient_Start(cl))) goto done;
-    ok = 1; status("GamePad mic active - buffered audio; choose CABLE Output as the microphone in your app");
+    ok = 1;
+    {
+        char msg[160];
+        snprintf(msg, sizeof msg, "GamePad mic active - CABLE Input, %u Hz, %u-bit, %u ch",
+                 (unsigned)fmt->nSamplesPerSec, (unsigned)fmt->wBitsPerSample, (unsigned)fmt->nChannels);
+        status("%s", msg);
+    }
 
     while (!*a->stop) {
         DWORD wait = WaitForSingleObject(audio_event, 4);
@@ -421,14 +431,20 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         BYTE *dst = NULL;
         if (FAILED(IAudioRenderClient_GetBuffer(render, frames, &dst))) break;
         int ch = fmt->nChannels, bits = fmt->wBitsPerSample;
-        double fill_error = ((double)fifo_count - 4800.0) / 4800.0;
-        if (fill_error > 1.0) fill_error = 1.0;
-        if (fill_error < -1.0) fill_error = -1.0;
-        double step = (48000.0 / (double)fmt->nSamplesPerSec) * (1.0 + fill_error * 0.004);
+        /* The source is fixed at 48 kHz. Keep the exact rate ratio; do not
+           modulate playback speed to chase FIFO fill, which adds audible
+           pitch jitter. If the network briefly underruns, output silence
+           without advancing past samples that have not arrived. */
+        double step = 48000.0 / (double)fmt->nSamplesPerSec;
         for (UINT32 i = 0; i < frames; i++) {
             UINT sample_index = (UINT)src_phase;
-            int16_t sample = sample_index < fifo_count ? fifo[(fifo_read + sample_index) % 48000] : 0;
-            src_phase += step;
+            int16_t sample = 0;
+            if (sample_index < fifo_count) {
+                sample = fifo[(fifo_read + sample_index) % 48000];
+                src_phase += step;
+            } else {
+                src_phase = 0.0;
+            }
             for (int c = 0; c < ch; c++) {
                 size_t at = ((size_t)i * ch + c) * (bits / 8);
                 if (isfloat) { float v = sample / 32768.0f; memcpy(dst + at, &v, 4); }
@@ -438,7 +454,7 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         }
         UINT consumed = (UINT)src_phase;
         src_phase -= consumed;
-        if (consumed > fifo_count) consumed = fifo_count;
+        if (consumed > fifo_count) { consumed = fifo_count; src_phase = 0.0; }
         fifo_read = (fifo_read + consumed) % 48000;
         fifo_count -= consumed;
         if (FAILED(IAudioRenderClient_ReleaseBuffer(render, frames, 0))) break;
