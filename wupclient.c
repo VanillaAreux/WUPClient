@@ -71,7 +71,7 @@ static DWORD WINAPI install_update_thread(LPVOID param) {
     FILE *f=fopen(bat,"w");
     if (!f) { DeleteFileA(exe); free(u); return 0; }
     fprintf(f,"@echo off\r\n"
-              "ping 127.0.0.1 -n 3 >nul\r\n"
+              "ping 127.0.0.1 -n 10 >nul\r\n"
               "copy /y \"%s\" \"%s\" >nul\r\n"
               "if errorlevel 1 exit /b 1\r\n"
               "start \"\" \"%s\"\r\n"
