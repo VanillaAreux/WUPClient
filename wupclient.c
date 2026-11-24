@@ -11,6 +11,7 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <shellapi.h>
+#include <commdlg.h>
 #include <urlmon.h>
 
 #include <bcrypt.h>
@@ -120,6 +121,7 @@ static DWORD WINAPI check_updates_thread(LPVOID unused) {
 #define ID_CTRL  104
 #define ID_PTR   105
 #define ID_GAME  106
+#define ID_BROWSE 107
 #define WM_LAUNCH_GAME (WM_APP + 6)
 #define WM_STATUS (WM_APP + 1)
 #define WM_STOPPED (WM_APP + 2)
@@ -882,6 +884,18 @@ static void stop(void) {
     SetWindowTextA(g_status, "Stopping...");
 }
 
+static void browse_game(void) {
+    char path[MAX_PATH] = "";
+    GetWindowTextA(g_game, path, sizeof path);
+    OPENFILENAMEA ofn; memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn; ofn.hwndOwner = g_win;
+    ofn.lpstrFilter = "Executable files (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 1; ofn.lpstrFile = path; ofn.nMaxFile = sizeof path;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle = "Choose a game executable";
+    if (GetOpenFileNameA(&ofn)) { SetWindowTextA(g_game, path); save_cfg(); }
+}
+
 static void launch_configured_game(void) {
     char path[MAX_PATH], cmd[MAX_PATH + 4], workdir[MAX_PATH];
     GetWindowTextA(g_game, path, sizeof path);
@@ -918,6 +932,7 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_COMMAND:
         if (LOWORD(w) == ID_START) { if (g_run) stop(); else start(); }
         else if (LOWORD(w) == ID_PTR) { g_drawptr = SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED; save_cfg(); }
+        else if (LOWORD(w) == ID_BROWSE) browse_game();
         else if (LOWORD(w) == ID_CTRL && HIWORD(w) == CBN_SELCHANGE) {
             int i = (int)SendMessage(g_ctrl, CB_GETCURSEL, 0, 0);
             if (i >= 0 && i < 4) { g_mode = i; SetWindowTextA(g_help, HELP[i]); save_cfg(); check_driver(i); }
@@ -995,7 +1010,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     SendMessage(g_ptr, BM_SETCHECK, BST_CHECKED, 0);
     SendMessage(g_audio, BM_SETCHECK, BST_CHECKED, 0);
     mk("STATIC", "Game executable (.exe) for HOME + Y launch:", 0, 16, 146, 388, 18, NULL, f, inst);
-    g_game = mk("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 16, 166, 388, 24, (HMENU)ID_GAME, f, inst);
+    g_game = mk("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 16, 166, 300, 24, (HMENU)ID_GAME, f, inst);
+    mk("BUTTON", "Browse...", 0, 324, 166, 80, 24, (HMENU)ID_BROWSE, f, inst);
     mk("STATIC", "GamePad controls:", 0, 16, 202, 110, 22, NULL, f, inst);
     g_ctrl = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 126, 198, 278, 120, (HMENU)ID_CTRL, f, inst);
     SendMessageA(g_ctrl, CB_ADDSTRING, 0, (LPARAM)"Keyboard + mouse (games)");
