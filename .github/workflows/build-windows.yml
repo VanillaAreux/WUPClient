@@ -1,0 +1,70 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wupclient.c"
+      - "README.md"
+      - ".github/workflows/build-windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out WUPClient
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            nasm
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Build libwupstream
+        shell: msys2 {0}
+        run: |
+          git clone --depth 1 https://github.com/ravensclawx/wup-stream.git
+          cd wup-stream/host
+          bash build.sh
+
+      - name: Build ViGEmClient
+        shell: msys2 {0}
+        run: |
+          git clone --depth 1 https://github.com/nefarius/ViGEmClient.git
+          cmake -S ViGEmClient -B build-vigem -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_RC_COMPILER=windres
+          cmake --build build-vigem --config Release
+
+      - name: Build WUPClient
+        shell: msys2 {0}
+        run: |
+          gcc -O2 -Wall -I wup-stream/host -I ViGEmClient/include -c wupclient.c -o wupclient.o
+          g++ -O2 -mwindows -static-libgcc -static-libstdc++ \
+            wupclient.o wup-stream/build/host/libwupstream.a build-vigem/libViGEmClient.a \
+            -o wupclient.exe \
+            -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 \
+            -luuid -lurlmon -lshell32 -lpropsys -lpthread -lm -lbcrypt
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: WUPClient-Windows-x64
+          path: wupclient.exe
+          if-no-files-found: error
+          retention-days: 30
