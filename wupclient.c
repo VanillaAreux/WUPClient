@@ -12,6 +12,96 @@
 #include <audioclient.h>
 #include <shellapi.h>
 #include <urlmon.h>
+
+#include <bcrypt.h>
+#define WUPCLIENT_VERSION "2.0.0"
+#define WM_UPDATE_AVAILABLE (WM_APP + 5)
+typedef struct { char tag[64], url[2048], digest[80]; } update_info;
+static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
+
+static int json_string(const char *json, const char *key, char *out, size_t cap) {
+    char needle[80]; snprintf(needle, sizeof needle, "\"%s\":\"", key);
+    const char *p = strstr(json, needle); if (!p) return 0;
+    p += strlen(needle); size_t n = 0;
+    while (*p && *p != '"' && n + 1 < cap) {
+        if (*p == '\\' && p[1]) p++;
+        out[n++] = *p++;
+    }
+    out[n] = 0; return *p == '"';
+}
+static int newer_version(const char *tag) {
+    int a=0,b=0,c=0,x=0,y=0,z=0;
+    if (sscanf(tag, "v%d.%d.%d", &a,&b,&c) != 3 && sscanf(tag, "V%d.%d.%d", &a,&b,&c) != 3) return 0;
+    if (sscanf(WUPCLIENT_VERSION, "%d.%d.%d", &x,&y,&z) != 3) return 0;
+    return a != x ? a > x : b != y ? b > y : c > z;
+}
+static int sha256_file(const char *path, char hex[65]) {
+    BCRYPT_ALG_HANDLE alg=NULL; BCRYPT_HASH_HANDLE hash=NULL;
+    DWORD objlen=0, got=0; BYTE *obj=NULL, digest[32], buf[65536]; int ok=0;
+    HANDLE f=CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f==INVALID_HANDLE_VALUE) return 0;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0) < 0) goto done;
+    if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, (PUCHAR)&objlen, sizeof objlen, &got, 0) < 0) goto done;
+    obj=(BYTE*)malloc(objlen); if (!obj) goto done;
+    if (BCryptCreateHash(alg,&hash,obj,objlen,NULL,0,0)<0) goto done;
+    for (;;) { DWORD n=0; if (!ReadFile(f,buf,sizeof buf,&n,NULL)) goto done; if (!n) break;
+        if (BCryptHashData(hash,buf,n,0)<0) goto done; }
+    if (BCryptFinishHash(hash,digest,sizeof digest,0)<0) goto done;
+    for (int i=0;i<32;i++) sprintf(hex+i*2,"%02x",digest[i]); hex[64]=0; ok=1;
+done:
+    if (hash) BCryptDestroyHash(hash); if (alg) BCryptCloseAlgorithmProvider(alg,0);
+    free(obj); CloseHandle(f); return ok;
+}
+static DWORD WINAPI install_update_thread(LPVOID param) {
+    update_info *u=(update_info*)param;
+    char tmp[MAX_PATH], exe[MAX_PATH], bat[MAX_PATH], jsonpath[MAX_PATH], actual[65];
+    GetTempPathA(MAX_PATH,tmp);
+    snprintf(exe,sizeof exe,"%swupclient-update.exe",tmp);
+    snprintf(bat,sizeof bat,"%swupclient-update.bat",tmp);
+    snprintf(jsonpath,sizeof jsonpath,"%swupclient-update.json",tmp);
+    DeleteFileA(exe);
+    if (URLDownloadToFileA(NULL,u->url,exe,0,NULL)!=S_OK || !sha256_file(exe,actual) ||
+        _stricmp(actual,u->digest+7)!=0) {
+        DeleteFileA(exe);
+        MessageBoxA(g_win,"The update download failed verification. Your installed copy was not changed.",
+                    "WUP Stream Client updater",MB_OK|MB_ICONERROR);
+        free(u); return 0;
+    }
+    GetModuleFileNameA(NULL, jsonpath, sizeof jsonpath); /* reuse buffer for the installed executable path */
+    FILE *f=fopen(bat,"w");
+    if (!f) { DeleteFileA(exe); free(u); return 0; }
+    fprintf(f,"@echo off\r\n"
+              "ping 127.0.0.1 -n 3 >nul\r\n"
+              "copy /y \"%s\" \"%s\" >nul\r\n"
+              "if errorlevel 1 exit /b 1\r\n"
+              "start \"\" \"%s\"\r\n"
+              "del \"%%~f0\"\r\n",exe,jsonpath,jsonpath);
+    fclose(f);
+    ShellExecuteA(NULL,"open",bat,NULL,NULL,SW_HIDE);
+    free(u);
+    PostMessageA(g_win,WM_CLOSE,0,0);
+    return 0;
+}
+static DWORD WINAPI check_updates_thread(LPVOID unused) {
+    (void)unused;
+    char tmp[MAX_PATH], path[MAX_PATH], *json=NULL; DWORD size=0; update_info *u=NULL;
+    GetTempPathA(MAX_PATH,tmp); snprintf(path,sizeof path,"%swupclient-release.json",tmp);
+    if (URLDownloadToFileA(NULL,RELEASE_API,path,0,NULL)!=S_OK) return 0;
+    FILE *f=fopen(path,"rb"); if (!f) { DeleteFileA(path); return 0; }
+    fseek(f,0,SEEK_END); long len=ftell(f); rewind(f);
+    if (len<=0 || len>1024*1024) { fclose(f); DeleteFileA(path); return 0; }
+    json=(char*)malloc((size_t)len+1); if (!json) { fclose(f); DeleteFileA(path); return 0; }
+    size=(DWORD)fread(json,1,(size_t)len,f); fclose(f); DeleteFileA(path); json[size]=0;
+    u=(update_info*)calloc(1,sizeof *u);
+    if (u && json_string(json,"tag_name",u->tag,sizeof u->tag) &&
+        json_string(json,"browser_download_url",u->url,sizeof u->url) &&
+        json_string(json,"digest",u->digest,sizeof u->digest) &&
+        strncmp(u->digest,"sha256:",7)==0 && newer_version(u->tag)) {
+        PostMessageA(g_win,WM_UPDATE_AVAILABLE,0,(LPARAM)u); u=NULL;
+    }
+    free(u); free(json); return 0;
+}
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -797,6 +887,15 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (t) CloseHandle(t); else g_vginstalling = 0;
         }
         return 0;
+    case WM_UPDATE_AVAILABLE: {
+        update_info *u=(update_info*)l;
+        char msg[256]; snprintf(msg,sizeof msg,"Version %s is available. Download and install it now?",u->tag);
+        if (MessageBoxA(h,msg,"WUP Stream Client update",MB_YESNO|MB_ICONINFORMATION)==IDYES) {
+            HANDLE t=CreateThread(NULL,0,install_update_thread,u,0,NULL);
+            if (t) CloseHandle(t); else free(u);
+        } else free(u);
+        return 0;
+    }
     case WM_STATUS: SetWindowTextA(g_status, (char *)l); free((void *)l); return 0;
     case WM_SETMODE: {
         int i = (int)w;
@@ -862,6 +961,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     g_help = mk("STATIC", HELP[0], 0, 16, 256, 388, 130, NULL, f, inst);
     load_cfg();
     ShowWindow(g_win, show); UpdateWindow(g_win);
+    { HANDLE t=CreateThread(NULL,0,check_updates_thread,NULL,0,NULL); if (t) CloseHandle(t); }
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessage(&msg); }
     WSACleanup();
