@@ -14,7 +14,7 @@
 #include <urlmon.h>
 
 #include <bcrypt.h>
-#define WUPCLIENT_VERSION "2.0.0"
+#define WUPCLIENT_VERSION "2.1.0"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
@@ -119,6 +119,8 @@ static DWORD WINAPI check_updates_thread(LPVOID unused) {
 #define ID_IP    103
 #define ID_CTRL  104
 #define ID_PTR   105
+#define ID_GAME  106
+#define WM_LAUNCH_GAME (WM_APP + 6)
 #define WM_STATUS (WM_APP + 1)
 #define WM_STOPPED (WM_APP + 2)
 #define WM_NEEDDRIVER (WM_APP + 4)   /* the ViGEmBus driver is missing: offer to install it */
@@ -129,7 +131,7 @@ static const GUID MY_IID_Enum   = {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D
 static const GUID MY_IID_Client = {0x1CB9AD4C,0xDBFA,0x4C32,{0xB1,0x78,0xC2,0xF5,0x68,0xA7,0x03,0xB2}};
 static const GUID MY_IID_Capture= {0xC8ADBD64,0xE71E,0x48A0,{0xA4,0xDE,0x18,0x5C,0x39,0x5C,0xD3,0x17}};
 
-static HWND g_win, g_btn, g_audio, g_ip, g_status, g_ctrl, g_ptr;
+static HWND g_win, g_btn, g_audio, g_ip, g_status, g_ctrl, g_ptr, g_game;
 static volatile LONG g_drawptr = 1;   /* draw our own mouse pointer on the frame (off if the capture already contains one) */
 static volatile LONG g_run;         /* 1 while the user wants streaming */
 static HANDLE g_thread;
@@ -684,7 +686,7 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
         wupstream_input_t in; int tick = 0; DWORD t0 = GetTickCount(); int frames = 0;
         uint32_t cyclemod_prev = 0;      /* +/- state last tick, for edge-detecting the profile-cycle combo */
         uint32_t chordheld = 0;          /* +/- buttons used in a combo: swallowed until released */
-        int homeheld = 0, chord = 0, shown = -1; uint32_t dpad_prev = 0, xprev = 0;
+        int homeheld = 0, chord = 0, shown = -1; uint32_t dpad_prev = 0, xprev = 0, yprev = 0;
         DWORD hometap_until = 0, banner_until = 0, rumble_off = 0;
         while (g_run && wupstream_input(pad, &in) == 0) {
             DWORD now = GetTickCount();
@@ -711,6 +713,9 @@ static DWORD WINAPI stream_thread(LPVOID unused) {
             uint32_t xmod = raw & WUPSTREAM_X;
             if (home && xmod && !xprev) { g_osk = !g_osk; chord = 1; chordheld |= xmod; }     /* HOME + X: on-screen keyboard */
             xprev = home ? xmod : 0;
+            uint32_t ymod = raw & WUPSTREAM_Y;
+            if (home && ymod && !yprev) { PostMessage(g_win, WM_LAUNCH_GAME, 0, 0); chord = 1; chordheld |= ymod; } /* HOME + Y: launch configured game */
+            yprev = home ? ymod : 0;
             cyclemod_prev = home ? cyclemod : 0;
             if (home) homeheld = 1;
             else { if (homeheld && !chord) hometap_until = now + 80; homeheld = 0; chord = 0; }
@@ -838,6 +843,7 @@ static void save_cfg(void) {
     WritePrivateProfileStringA("wup", "ip", ip, g_ini);
     WritePrivateProfileStringA("wup", "audio", SendMessage(g_audio, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
     WritePrivateProfileStringA("wup", "pointer", SendMessage(g_ptr, BM_GETCHECK, 0, 0) == BST_CHECKED ? "1" : "0", g_ini);
+    { char game[MAX_PATH]; GetWindowTextA(g_game, game, sizeof game); WritePrivateProfileStringA("wup", "game", game, g_ini); }
     snprintf(v, sizeof v, "%d", (int)g_mode);
     WritePrivateProfileStringA("wup", "mode", v, g_ini);
     snprintf(v, sizeof v, "%d", (int)g_looksens); WritePrivateProfileStringA("wup", "look", v, g_ini);
@@ -849,6 +855,7 @@ static void load_cfg(void) {
     char *dot = strrchr(g_ini, '.'); if (dot) strcpy(dot, ".ini"); else strcat(g_ini, ".ini");
     GetPrivateProfileStringA("wup", "ip", "", ip, sizeof ip, g_ini);
     SetWindowTextA(g_ip, ip);
+    { char game[MAX_PATH]; GetPrivateProfileStringA("wup", "game", "", game, sizeof game, g_ini); SetWindowTextA(g_game, game); }
     SendMessage(g_audio, BM_SETCHECK, GetPrivateProfileIntA("wup", "audio", 1, g_ini) ? BST_CHECKED : BST_UNCHECKED, 0);
     int p = GetPrivateProfileIntA("wup", "pointer", 1, g_ini);
     SendMessage(g_ptr, BM_SETCHECK, p ? BST_CHECKED : BST_UNCHECKED, 0); g_drawptr = p;
@@ -873,6 +880,37 @@ static void stop(void) {
     g_run = 0;
     EnableWindow(g_btn, FALSE);
     SetWindowTextA(g_status, "Stopping...");
+}
+
+static void launch_configured_game(void) {
+    char path[MAX_PATH], cmd[MAX_PATH + 4], workdir[MAX_PATH];
+    GetWindowTextA(g_game, path, sizeof path);
+    DWORD attrs = GetFileAttributesA(path);
+    if (!path[0] || attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        status("Set a valid game .exe path in the PC window first");
+        return;
+    }
+    if (!IsUserAnAdmin()) {
+        status("Game launch blocked: restart WUPClient using Run as administrator first");
+        MessageBoxA(g_win,
+            "To launch games that request administrator access without another UAC prompt, WUPClient itself must already be running as administrator.\n\nClose WUPClient and choose Run as administrator, approve that one prompt locally, then reconnect the GamePad.",
+            "WUP Stream Client - elevated launch", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    snprintf(cmd, sizeof cmd, "\"%s\"", path);
+    strncpy(workdir, path, sizeof workdir - 1); workdir[sizeof workdir - 1] = 0;
+    char *slash = strrchr(workdir, '\\');
+    if (!slash) slash = strrchr(workdir, '/');
+    if (slash) *slash = 0; else workdir[0] = 0;
+    STARTUPINFOA si; PROCESS_INFORMATION pi;
+    memset(&si, 0, sizeof si); memset(&pi, 0, sizeof pi); si.cb = sizeof si;
+    if (CreateProcessA(path, cmd, NULL, NULL, FALSE, 0, NULL, workdir[0] ? workdir : NULL, &si, &pi)) {
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        status("Launched game from the elevated WUPClient session");
+    } else {
+        char msg[256]; snprintf(msg, sizeof msg, "Windows could not launch the game (error %lu)", GetLastError());
+        status("%s", msg); MessageBoxA(g_win, msg, "WUP Stream Client", MB_OK | MB_ICONERROR);
+    }
 }
 
 static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -903,6 +941,7 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     }
     case WM_STATUS: SetWindowTextA(g_status, (char *)l); free((void *)l); return 0;
+    case WM_LAUNCH_GAME: launch_configured_game(); return 0;
     case WM_SETMODE: {
         int i = (int)w;
         if (i >= 0 && i < 4) {
@@ -944,7 +983,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1); wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    RECT r = {0, 0, S(420), S(400)}; AdjustWindowRect(&r, style, FALSE);
+    RECT r = {0, 0, S(420), S(460)}; AdjustWindowRect(&r, style, FALSE);
     g_win = CreateWindowA("WupClient", "WUP Stream Client", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, NULL, NULL, inst, NULL);
     HFONT f = CreateFontA(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
     HFONT fb = CreateFontA(-MulDiv(9, g_dpi, 72), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, "Segoe UI");
@@ -955,16 +994,18 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     g_ptr = mk("BUTTON", "Draw mouse pointer (untick if you see two)", BS_AUTOCHECKBOX, 170, 112, 234, 22, (HMENU)ID_PTR, f, inst);
     SendMessage(g_ptr, BM_SETCHECK, BST_CHECKED, 0);
     SendMessage(g_audio, BM_SETCHECK, BST_CHECKED, 0);
-    mk("STATIC", "GamePad controls:", 0, 16, 146, 110, 22, NULL, f, inst);
-    g_ctrl = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 126, 142, 278, 120, (HMENU)ID_CTRL, f, inst);
+    mk("STATIC", "Game executable (.exe) for HOME + Y launch:", 0, 16, 146, 388, 18, NULL, f, inst);
+    g_game = mk("EDIT", "", WS_BORDER | ES_AUTOHSCROLL, 16, 166, 388, 24, (HMENU)ID_GAME, f, inst);
+    mk("STATIC", "GamePad controls:", 0, 16, 202, 110, 22, NULL, f, inst);
+    g_ctrl = mk("COMBOBOX", "", CBS_DROPDOWNLIST | WS_VSCROLL, 126, 198, 278, 120, (HMENU)ID_CTRL, f, inst);
     SendMessageA(g_ctrl, CB_ADDSTRING, 0, (LPARAM)"Keyboard + mouse (games)");
     SendMessageA(g_ctrl, CB_ADDSTRING, 0, (LPARAM)"Controller (virtual Xbox 360)");
     SendMessageA(g_ctrl, CB_ADDSTRING, 0, (LPARAM)"Desktop (mouse + keys)");
     SendMessageA(g_ctrl, CB_ADDSTRING, 0, (LPARAM)"Off");
     SendMessage(g_ctrl, CB_SETCURSEL, 0, 0);
-    g_btn = mk("BUTTON", "Start streaming", BS_DEFPUSHBUTTON, 16, 178, 388, 38, (HMENU)ID_START, fb, inst);
-    g_status = mk("STATIC", "Ready", 0, 16, 226, 388, 20, NULL, fb, inst);
-    g_help = mk("STATIC", HELP[0], 0, 16, 256, 388, 130, NULL, f, inst);
+    g_btn = mk("BUTTON", "Start streaming", BS_DEFPUSHBUTTON, 16, 234, 388, 38, (HMENU)ID_START, fb, inst);
+    g_status = mk("STATIC", "Ready", 0, 16, 282, 388, 20, NULL, fb, inst);
+    g_help = mk("STATIC", HELP[0], 0, 16, 312, 388, 130, NULL, f, inst);
     load_cfg();
     ShowWindow(g_win, show); UpdateWindow(g_win);
     { HANDLE t=CreateThread(NULL,0,check_updates_thread,NULL,0,NULL); if (t) CloseHandle(t); }
