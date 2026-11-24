@@ -268,7 +268,9 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         UINT32 avail = bufferFrames > padding ? bufferFrames - padding : 0;
         if (!avail) { Sleep(5); continue; }
         UINT32 frames = avail > 480 ? 480 : avail;
-        int got = wupstream_mic(a->pad, samples, 576);
+        int need = (int)(((uint64_t)frames * 48000 + fmt->nSamplesPerSec - 1) / fmt->nSamplesPerSec);
+        if (need > 576) need = 576;
+        int got = wupstream_mic(a->pad, samples, need);
         BYTE *dst = NULL;
         if (FAILED(IAudioRenderClient_GetBuffer(render, frames, &dst))) break;
         int isfloat = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
@@ -726,7 +728,7 @@ static void draw_settings_menu(HDC dc, HFONT f) {
     text_box(dc, f, "WUP STREAM SETTINGS", WUPSTREAM_W / 2, 88, RGB(34, 78, 130), 1);
     HGDIOBJ old = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT);
     for (int i = 0; i < 5; i++) {
-        RECT r = { 112, 145 + i * 48, WUPSTREAM_W - 112, 185 + i * 48 };
+        RECT r = { 112, 136 + i * 42, WUPSTREAM_W - 112, 172 + i * 42 };
         b = CreateSolidBrush(i == g_settings_sel ? RGB(38, 105, 180) : RGB(48, 54, 64));
         FillRect(dc, &r, b); DeleteObject(b);
         SetTextColor(dc, RGB(255,255,255));
