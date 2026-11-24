@@ -908,7 +908,10 @@ static void launch_configured_game(void) {
     strncpy(workdir, path, sizeof workdir - 1); workdir[sizeof workdir - 1] = 0;
     char *slash = strrchr(workdir, '\\');
     if (!slash) slash = strrchr(workdir, '/');
-    if (slash) *slash = 0; else workdir[0] = 0;
+    if (slash) {
+        if (slash == workdir + 2 && workdir[1] == ':') slash[1] = 0; /* keep a drive root such as C:\\ */
+        else *slash = 0;
+    } else workdir[0] = 0;
     STARTUPINFOA si; PROCESS_INFORMATION pi;
     memset(&si, 0, sizeof si); memset(&pi, 0, sizeof pi); si.cb = sizeof si;
     if (CreateProcessA(path, cmd, NULL, NULL, FALSE, 0, NULL, workdir[0] ? workdir : NULL, &si, &pi)) {
