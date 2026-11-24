@@ -48,7 +48,7 @@ Hold **HOME** and press another button. While HOME is held, nothing else reaches
 
 Mode order for +/−: Keyboard + mouse, Controller, Desktop, Off, then it wraps.
 
-In the settings menu, use D-pad Up/Down to select, **A** to change a setting, and **B** to close. Available settings: GamePad microphone, stream quality, mouse pointer, control mode, and close. Stream quality offers Balanced (4.5 Mbps) and Low (3.5 Mbps); a quality change takes effect after the next reconnect.
+In the settings menu, use D-pad Up/Down to select, **A** to change a setting, and **B** to close. Available settings: GamePad microphone, stream quality, mouse pointer, control mode, disconnect GamePad, VB-CABLE setup, and close. **Disconnect GamePad** closes only the GamePad connection; the PC capture/stream process stays running and waits for the GamePad to reconnect. Stream quality offers Balanced (4.5 Mbps) and Low (3.5 Mbps); a quality change takes effect after the next reconnect.
 
 Tapping HOME **on its own** (press and release with no combo) does the mode's normal HOME action, listed below.
 
@@ -147,7 +147,7 @@ When publishing a release, bump WUPCLIENT_VERSION in wupclient.c to the release'
 
 ## GamePad microphone
 
-The GamePad settings menu includes a **GamePad microphone** toggle. To use it in Windows apps, install **VB-CABLE** from VB-Audio. WUPClient sends the GamePad microphone to the VB-CABLE playback endpoint named **CABLE Input**; in Discord, games, or another app, select **CABLE Output** as the recording/microphone device. The microphone is off by default. This is a virtual audio routing path; it does not replace a physical microphone driver.
+The GamePad settings menu includes a **GamePad microphone** toggle and **Set up VB-CABLE** action. If the CABLE Input playback endpoint is not detected, choose Set up VB-CABLE: WUPClient downloads the current ZIP from the official VB-Audio site, extracts it, and opens the x64 installer. Windows will show its normal UAC prompt and the VB-CABLE installer remains interactive; WUPClient does not silently install a kernel driver. Complete the installer and restart Windows if it requests it. WUPClient sends the GamePad microphone to **CABLE Input**; in Discord, games, or another app, select **CABLE Output** as the recording/microphone device. The microphone is off by default.
 
 ## How it works
 
@@ -159,7 +159,7 @@ The GamePad settings menu includes a **GamePad microphone** toggle. To use it in
 
 ## Stability and troubleshooting
 
-The default stream cap is now 4.5 Mbps, with a 3.5 Mbps Low option in the GamePad settings. If the GamePad struggles or the Wi-Fi is busy, switch to Low. Audio worker threads are joined before the stream connection is released, and closing the PC client waits for the stream worker to finish.
+The default stream cap is now 4.5 Mbps, with a 3.5 Mbps Low option in the GamePad settings. If the GamePad struggles or the Wi-Fi is busy, switch to Low. Audio worker threads are joined before the stream connection is released, and closing the PC client waits for the stream worker to finish. Selecting **Disconnect GamePad** ends the current GamePad connection without stopping PC-side capture; WUPClient keeps waiting for the GamePad to reconnect.
 
 ## Troubleshooting
 
