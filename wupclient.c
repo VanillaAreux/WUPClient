@@ -904,13 +904,6 @@ static void launch_configured_game(void) {
         status("Set a valid game .exe path in the PC window first");
         return;
     }
-    if (!IsUserAnAdmin()) {
-        status("Game launch blocked: restart WUPClient using Run as administrator first");
-        MessageBoxA(g_win,
-            "To launch games that request administrator access without another UAC prompt, WUPClient itself must already be running as administrator.\n\nClose WUPClient and choose Run as administrator, approve that one prompt locally, then reconnect the GamePad.",
-            "WUP Stream Client - elevated launch", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
     snprintf(cmd, sizeof cmd, "\"%s\"", path);
     strncpy(workdir, path, sizeof workdir - 1); workdir[sizeof workdir - 1] = 0;
     char *slash = strrchr(workdir, '\\');
@@ -922,8 +915,16 @@ static void launch_configured_game(void) {
         CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
         status("Launched game from the elevated WUPClient session");
     } else {
-        char msg[256]; snprintf(msg, sizeof msg, "Windows could not launch the game (error %lu)", GetLastError());
-        status("%s", msg); MessageBoxA(g_win, msg, "WUP Stream Client", MB_OK | MB_ICONERROR);
+        DWORD err = GetLastError();
+        char msg[384];
+        if (err == ERROR_ELEVATION_REQUIRED) {
+            snprintf(msg, sizeof msg, "This game requires administrator access. Restart WUPClient with Run as administrator, approve the prompt locally, then reconnect and try HOME + Y again.");
+            status("This game needs an elevated WUPClient session");
+            MessageBoxA(g_win, msg, "WUP Stream Client - elevated launch", MB_OK | MB_ICONINFORMATION);
+        } else {
+            snprintf(msg, sizeof msg, "Windows could not launch the game (error %lu)", err);
+            status("%s", msg); MessageBoxA(g_win, msg, "WUP Stream Client", MB_OK | MB_ICONERROR);
+        }
     }
 }
 
