@@ -16,10 +16,10 @@ Built on [libwupstream](https://github.com/ravensclawx/wup-stream) (`host/`). Li
 1. On the Wii U, open **WUP Stream** from the Homebrew Menu.
 2. On the PC, run `wupclient.exe`.
 3. Leave the IP box empty to auto-detect, or type the GamePad's IP.
-4. Optionally enter a game executable path in **Game executable** (for remote launching), pick a control mode, then click **Start streaming**.
+4. Pick a control mode, then click **Start streaming**. Press **HOME + Y** on the GamePad to open the settings menu.
 5. The status line shows the FPS and GamePad battery once connected. If the GamePad drops, the client reconnects on its own.
 
-Your IP, sound, pointer and mode choices are remembered in `wupclient.ini` next to the exe.
+Your IP, sound, pointer, mode, microphone and stream-quality choices are remembered in `wupclient.ini` next to the exe.
 
 ## Window options
 
@@ -29,6 +29,7 @@ Your IP, sound, pointer and mode choices are remembered in `wupclient.ini` next 
 | Stream PC sound | Sends the default output device's audio to the GamePad (WASAPI loopback). Locked while streaming. |
 | Draw mouse pointer | Draws a pointer on the streamed picture. Untick it if you see two. |
 | GamePad controls | Selects the control mode (below). Can be changed while streaming. |
+| GamePad settings | Open on the GamePad with HOME + Y; changes are saved automatically. |
 
 ## HOME is the fn key
 
@@ -43,9 +44,11 @@ Hold **HOME** and press another button. While HOME is held, nothing else reaches
 | HOME + D-pad **Down** | Desktop |
 | HOME + D-pad **Left** | Off |
 | HOME + **X** | Show / hide the on-screen keyboard |
-| HOME + **Y** | Launch the configured game executable |
+| HOME + **Y** | Open / close the GamePad settings menu |
 
 Mode order for +/−: Keyboard + mouse, Controller, Desktop, Off, then it wraps.
+
+In the settings menu, use D-pad Up/Down to select, **A** to change a setting, and **B** to close. Available settings: GamePad microphone, stream quality, mouse pointer, control mode, and close. Stream quality offers Balanced (4.5 Mbps) and Low (3.5 Mbps); a quality change takes effect after the next reconnect.
 
 Tapping HOME **on its own** (press and release with no combo) does the mode's normal HOME action, listed below.
 
@@ -142,20 +145,21 @@ The client checks the latest GitHub Release in the background at startup. If a n
 
 When publishing a release, bump WUPCLIENT_VERSION in wupclient.c to the release's numeric version (without the leading V). Releases need a Windows executable asset with a SHA-256 digest in GitHub's release metadata.
 
-## Remote game launching and Windows UAC
+## GamePad microphone
 
-Use **Browse...** to choose one game executable in the **Game executable** field before starting the stream. The path is saved in `wupclient.ini`. Hold **HOME** and tap **Y** on the GamePad to launch it. The game is started directly by WUPClient, not through the Windows desktop shell.
-
-For games whose executable requests administrator access, WUPClient must already be running elevated: close it, choose **Run as administrator**, approve that one UAC prompt locally, then reconnect the GamePad. The game inherits WUPClient's already-approved elevated token, avoiding a separate prompt for that launch. Only configure executables you trust.
-
-This is a remote-launch workaround, not full AnyDesk-style secure-desktop control. Windows displays other UAC consent and credential prompts on its secure desktop by default. WUP Stream Client does not capture or send GamePad input to that desktop; unrelated prompts still need local approval. The ViGEmBus installer continues to use Windows' normal UAC flow.
+The GamePad settings menu includes a **GamePad microphone** toggle. To use it in Windows apps, install **VB-CABLE** from VB-Audio. WUPClient sends the GamePad microphone to the VB-CABLE playback endpoint named **CABLE Input**; in Discord, games, or another app, select **CABLE Output** as the recording/microphone device. The microphone is off by default. This is a virtual audio routing path; it does not replace a physical microphone driver.
 
 ## How it works
 
 - **Video:** DXGI Desktop Duplication on the primary monitor, so full-screen games come through. It falls back to GDI ("basic capture" shows in the status line) on old Windows, HDR, rotated, or remote-desktop setups. The picture is scaled to the GamePad's 854x480 and keeps its aspect ratio.
 - **Audio:** WASAPI loopback of the default output, converted to 48 kHz stereo 16-bit. Silence is sent while nothing is playing.
+- **GamePad microphone:** the stream library returns 48 kHz mono audio; WUPClient routes it to VB-CABLE when enabled.
 - **Input:** Keyboard and mouse use `SendInput`. Controller mode uses ViGEmBus.
 - Capture follows resolution changes; if a game changes the display mode, the client reopens capture automatically.
+
+## Stability and troubleshooting
+
+The default stream cap is now 4.5 Mbps, with a 3.5 Mbps Low option in the GamePad settings. If the GamePad struggles or the Wi-Fi is busy, switch to Low. Audio worker threads are joined before the stream connection is released, and closing the PC client waits for the stream worker to finish.
 
 ## Troubleshooting
 
@@ -170,11 +174,11 @@ This is a remote-launch workaround, not full AnyDesk-style secure-desktop contro
 
 ## Building
 
-Source is `wupclient.c`. It needs `wupstream.h`, `libwupstream.a` (libwupstream plus the GamePad-patched x264), and the ViGEm client library.
+Source is `wupclient.c`. It needs `wupstream.h`, `libwupstream.a` (libwupstream plus the GamePad-patched x264), and the ViGEm client library. The repository GitHub Actions workflow builds a Windows x64 EXE and publishes it as a downloadable workflow artifact.
 
 **MSYS2 UCRT64 (as the source header says):** build libwupstream with `host/build.sh` from the wup-stream repo, then link `wupclient.c` against `libwupstream.a`, the ViGEmClient sources, and:
 
-`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lcomdlg32 -lpthread -lm -lbcrypt`
+`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lpropsys -lpthread -lm -lbcrypt`
 
 **Linux cross-compile (MinGW-w64):**
 
