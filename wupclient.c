@@ -634,7 +634,7 @@ static void draw_overlay(HDC dc, HFONT fs, HFONT fl, int mode, int show) {      
     text_box(dc, fl, SHORT_NAMES[mode], WUPSTREAM_W / 2, WUPSTREAM_H - 172, MODE_COL[mode], 1);
     text_box(dc, fs, "HOME + PLUS / MINUS = next / previous mode", WUPSTREAM_W / 2, WUPSTREAM_H - 122, RGB(40, 40, 40), 1);
     text_box(dc, fs, "HOME + D-PAD: UP keyboard, RIGHT controller, DOWN desktop, LEFT off", WUPSTREAM_W / 2, WUPSTREAM_H - 94, RGB(40, 40, 40), 1);
-    text_box(dc, fs, "HOME + X = on-screen keyboard", WUPSTREAM_W / 2, WUPSTREAM_H - 66, RGB(40, 40, 40), 1);
+    text_box(dc, fs, "HOME + X = keyboard | HOME + Y = launch configured game", WUPSTREAM_W / 2, WUPSTREAM_H - 66, RGB(40, 40, 40), 1);
 }
 
 /* ---------------- the streaming thread ---------------- */
