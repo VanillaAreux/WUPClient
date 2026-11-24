@@ -27,7 +27,7 @@
 
 static HWND g_win;
 static void status(const char *fmt, ...);
-#define WUPCLIENT_VERSION "2.3.4"
+#define WUPCLIENT_VERSION "2.3.5"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
