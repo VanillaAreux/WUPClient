@@ -148,6 +148,7 @@ static volatile LONG g_cable_setup_running;
 static int g_settings_sel;
 
 #define VBCABLE_URL "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip"
+static void status(const char *fmt, ...);
 
 /* Check for VB-CABLE's playback endpoint before offering installation. */
 static int vbcable_installed(void) {
@@ -186,7 +187,7 @@ static DWORD WINAPI install_vbcable_thread(LPVOID unused) {
         return 0;
     }
     char tmp[MAX_PATH], script[MAX_PATH];
-    if (!GetTempPathA(sizeof tmp, tmp) || FAILED(StringCchPrintfA(script, MAX_PATH, "%sWUPClient_VBCABLE_Setup.ps1", tmp))) {
+    if (!GetTempPathA(sizeof tmp, tmp) || snprintf(script, sizeof script, "%sWUPClient_VBCABLE_Setup.ps1", tmp) < 0 || strlen(script) >= sizeof script) {
         status("Could not prepare VB-CABLE setup.");
         InterlockedExchange(&g_cable_setup_running, 0);
         return 0;
@@ -216,7 +217,7 @@ static DWORD WINAPI install_vbcable_thread(LPVOID unused) {
         return 0;
     }
     char params[MAX_PATH + 100];
-    StringCchPrintfA(params, sizeof params, "-NoProfile -ExecutionPolicy Bypass -File \"%s\"", script);
+    snprintf(params, sizeof params, "-NoProfile -ExecutionPolicy Bypass -File \"%s\"", script);
     SHELLEXECUTEINFOA sei; ZeroMemory(&sei, sizeof sei);
     sei.cbSize = sizeof sei; sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = "open"; sei.lpFile = "powershell.exe"; sei.lpParameters = params;
