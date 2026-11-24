@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "wupclient.c"
+      - "patch-wupstream-mic.py"
       - "README.md"
       - ".github/workflows/build-windows.yml"
   workflow_dispatch:
@@ -37,6 +38,7 @@ jobs:
         shell: msys2 {0}
         run: |
           git clone --depth 1 https://github.com/ravensclawx/wup-stream.git
+          python patch-wupstream-mic.py wup-stream/host/wupstream.c
           cd wup-stream/host
           bash build.sh
 
