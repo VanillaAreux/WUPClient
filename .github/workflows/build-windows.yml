@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -67,6 +67,18 @@ jobs:
           if objdump -p wupclient.exe | grep -Ei 'DLL Name: (libwinpthread|libgcc_s|libstdc\\+\\+)'; then
             echo "Unexpected MinGW runtime DLL dependency found."
             exit 1
+          fi
+
+      - name: Publish GitHub Release for the updater
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: V2.3.2
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" wupclient.exe --clobber
+          else
+            gh release create "$TAG" wupclient.exe --title "WUPClient $TAG" --notes "Windows x64 release. Includes microphone buffering and update-check fixes." --latest
           fi
 
       - name: Upload Windows executable
