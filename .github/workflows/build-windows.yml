@@ -75,12 +75,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: V2.3.3
+          TAG: V2.3.4
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" wupclient.exe --clobber
           else
-            gh release create "$TAG" wupclient.exe --title "WUPClient $TAG" --notes "Windows x64 release. Includes stabilized GamePad microphone playback, stricter VB-CABLE endpoint selection, and update-check fixes." --latest
+            gh release create "$TAG" wupclient.exe --title "WUPClient $TAG" --notes "Windows x64 release. Includes sequence-aware GamePad microphone packet recovery and stabilized VB-CABLE playback." --latest
           fi
 
       - name: Upload Windows executable
