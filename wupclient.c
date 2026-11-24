@@ -26,6 +26,7 @@
 #include "ViGEm/Client.h"
 
 static HWND g_win;
+static void status(const char *fmt, ...);
 #define WUPCLIENT_VERSION "2.3.2"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
@@ -165,7 +166,6 @@ static volatile LONG g_cable_setup_running;
 static int g_settings_sel;
 
 #define VBCABLE_URL "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip"
-static void status(const char *fmt, ...);
 
 /* Check for VB-CABLE's playback endpoint before offering installation. */
 static int vbcable_installed(void) {
