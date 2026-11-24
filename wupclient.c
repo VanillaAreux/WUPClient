@@ -26,17 +26,22 @@
 #include "ViGEm/Client.h"
 
 static HWND g_win;
-#define WUPCLIENT_VERSION "2.3.1"
+#define WUPCLIENT_VERSION "2.3.2"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
 
 static int json_string(const char *json, const char *key, char *out, size_t cap) {
-    char needle[80]; snprintf(needle, sizeof needle, "\"%s\":\"", key);
+    char needle[80]; snprintf(needle, sizeof needle, "\"%s\"", key);
     const char *p = strstr(json, needle); if (!p) return 0;
-    p += strlen(needle); size_t n = 0;
+    p += strlen(needle);
+    while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n') p++;
+    if (*p++ != ':') return 0;
+    while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n') p++;
+    if (*p++ != '"') return 0;
+    size_t n = 0;
     while (*p && *p != '"' && n + 1 < cap) {
-        if (*p == '\\' && p[1]) p++;
+        if (*p == '\\\\' && p[1]) p++;
         out[n++] = *p++;
     }
     out[n] = 0; return *p == '"';
@@ -103,20 +108,32 @@ static DWORD WINAPI install_update_thread(LPVOID param) {
 static DWORD WINAPI check_updates_thread(LPVOID unused) {
     (void)unused;
     char tmp[MAX_PATH], path[MAX_PATH], *json=NULL; DWORD size=0; update_info *u=NULL;
-    GetTempPathA(MAX_PATH,tmp); snprintf(path,sizeof path,"%swupclient-release.json",tmp);
-    if (URLDownloadToFileA(NULL,RELEASE_API,path,0,NULL)!=S_OK) return 0;
-    FILE *f=fopen(path,"rb"); if (!f) { DeleteFileA(path); return 0; }
+    status("Checking GitHub for updates...");
+    if (!GetTempPathA(MAX_PATH,tmp)) { status("Update check failed: cannot access the Windows temp folder."); return 0; }
+    snprintf(path,sizeof path,"%swupclient-release.json",tmp);
+    if (URLDownloadToFileA(NULL,RELEASE_API,path,0,NULL)!=S_OK) {
+        status("Update check failed: GitHub could not be reached. Check your internet connection.");
+        return 0;
+    }
+    FILE *f=fopen(path,"rb"); if (!f) { DeleteFileA(path); status("Update check failed: could not read GitHub's response."); return 0; }
     fseek(f,0,SEEK_END); long len=ftell(f); rewind(f);
-    if (len<=0 || len>1024*1024) { fclose(f); DeleteFileA(path); return 0; }
-    json=(char*)malloc((size_t)len+1); if (!json) { fclose(f); DeleteFileA(path); return 0; }
+    if (len<=0 || len>1024*1024) { fclose(f); DeleteFileA(path); status("Update check failed: GitHub returned an invalid response."); return 0; }
+    json=(char*)malloc((size_t)len+1); if (!json) { fclose(f); DeleteFileA(path); status("Update check failed: not enough memory."); return 0; }
     size=(DWORD)fread(json,1,(size_t)len,f); fclose(f); DeleteFileA(path); json[size]=0;
     u=(update_info*)calloc(1,sizeof *u);
-    if (u && json_string(json,"tag_name",u->tag,sizeof u->tag) &&
-        json_string(json,"browser_download_url",u->url,sizeof u->url) &&
-        json_string(json,"digest",u->digest,sizeof u->digest) &&
-        strncmp(u->digest,"sha256:",7)==0 && newer_version(u->tag)) {
-        PostMessageA(g_win,WM_UPDATE_AVAILABLE,0,(LPARAM)u); u=NULL;
-    }
+    if (u && json_string(json,"tag_name",u->tag,sizeof u->tag)) {
+        if (newer_version(u->tag)) {
+            if (json_string(json,"browser_download_url",u->url,sizeof u->url) &&
+                json_string(json,"digest",u->digest,sizeof u->digest) &&
+                strncmp(u->digest,"sha256:",7)==0) {
+                if (PostMessageA(g_win,WM_UPDATE_AVAILABLE,0,(LPARAM)u)) u=NULL;
+                else status("Update found, but the notification could not be displayed.");
+            } else status("Update found, but its release asset is missing a download URL or SHA-256 digest.");
+        } else {
+            char msg[160]; snprintf(msg,sizeof msg,"No newer release found. Installed %s; latest GitHub release %s.",WUPCLIENT_VERSION,u->tag);
+            status("%s",msg);
+        }
+    } else status("Update check failed: could not parse GitHub's release information.");
     free(u); free(json); return 0;
 }
 
@@ -364,7 +381,7 @@ static DWORD WINAPI mic_thread(LPVOID p) {
     /* wupstream_mic is a non-blocking dequeue, not a read that fills the requested
        amount. Poll it independently and buffer network jitter before rendering. */
     DWORD prime_start = GetTickCount();
-    while (!*a->stop && fifo_count < 1440 && GetTickCount() - prime_start < 500) {
+    while (!*a->stop && fifo_count < 4800 && GetTickCount() - prime_start < 2500) {
         int got = wupstream_mic(a->pad, incoming, 480);
         if (got > 0) {
             for (int i = 0; i < got; i++) fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
@@ -383,8 +400,8 @@ static DWORD WINAPI mic_thread(LPVOID p) {
            per render block and replaced missing network samples with silence. */
         int got = wupstream_mic(a->pad, incoming, 480);
         if (got > 0) {
-            if (fifo_count + (UINT)got > 12000) {
-                UINT drop = fifo_count + (UINT)got - 12000;
+            if (fifo_count + (UINT)got > 24000) {
+                UINT drop = fifo_count + (UINT)got - 24000;
                 fifo_read = (fifo_read + drop) % 48000;
                 fifo_count -= drop;
                 if (src_phase >= drop) src_phase -= drop; else src_phase = 0.0;
@@ -404,7 +421,10 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         BYTE *dst = NULL;
         if (FAILED(IAudioRenderClient_GetBuffer(render, frames, &dst))) break;
         int ch = fmt->nChannels, bits = fmt->wBitsPerSample;
-        double step = 48000.0 / (double)fmt->nSamplesPerSec;
+        double fill_error = ((double)fifo_count - 4800.0) / 4800.0;
+        if (fill_error > 1.0) fill_error = 1.0;
+        if (fill_error < -1.0) fill_error = -1.0;
+        double step = (48000.0 / (double)fmt->nSamplesPerSec) * (1.0 + fill_error * 0.004);
         for (UINT32 i = 0; i < frames; i++) {
             UINT sample_index = (UINT)src_phase;
             int16_t sample = sample_index < fifo_count ? fifo[(fifo_read + sample_index) % 48000] : 0;
