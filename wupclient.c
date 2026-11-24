@@ -287,7 +287,7 @@ static DWORD WINAPI mic_thread(LPVOID p) {
             }
         }
         if (FAILED(IAudioRenderClient_ReleaseBuffer(render, frames, 0))) break;
-        Sleep(5);
+        Sleep((DWORD)(((uint64_t)frames * 1000) / fmt->nSamplesPerSec));
     }
 done:
     if (!ok && !*a->stop) status("GamePad mic could not open CABLE Input - check VB-CABLE installation");
