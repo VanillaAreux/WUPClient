@@ -405,9 +405,12 @@ static DWORD WINAPI mic_thread(LPVOID p) {
 
     while (!*a->stop) {
         DWORD wait = WaitForSingleObject(audio_event, 4);
-        /* Keep draining the network at a steady cadence even if the audio device
-           has a different period or rate. The old implementation only read once
-           per render block and replaced missing network samples with silence. */
+        if (wait == WAIT_FAILED) break;
+        if (wait != WAIT_OBJECT_0) continue;
+
+        /* Dequeue only when the render event requests a new block. Pulling
+           480 samples on every 4 ms timeout drains a 48 kHz stream at up to
+           120 kHz, emptying the FIFO and producing constant crackle/dropouts. */
         int got = wupstream_mic(a->pad, incoming, 480);
         if (got > 0) {
             if (fifo_count + (UINT)got > 24000) {
@@ -419,8 +422,6 @@ static DWORD WINAPI mic_thread(LPVOID p) {
             for (int i = 0; i < got; i++) fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
             fifo_count += (UINT)got;
         }
-        if (wait == WAIT_FAILED) break;
-        if (wait != WAIT_OBJECT_0) continue;
 
         UINT32 padding = 0;
         if (FAILED(IAudioClient_GetCurrentPadding(cl, &padding))) break;
