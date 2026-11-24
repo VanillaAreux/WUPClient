@@ -77,7 +77,13 @@ static DWORD WINAPI install_update_thread(LPVOID param) {
               "start \"\" \"%s\"\r\n"
               "del \"%%~f0\"\r\n",exe,jsonpath,jsonpath);
     fclose(f);
-    ShellExecuteA(NULL,"open",bat,NULL,NULL,SW_HIDE);
+    HINSTANCE launched=ShellExecuteA(NULL,"open",bat,NULL,NULL,SW_HIDE);
+    if ((INT_PTR)launched<=32) {
+        DeleteFileA(bat); DeleteFileA(exe);
+        MessageBoxA(g_win,"The update was downloaded and verified, but Windows could not start the installer helper. The installed copy was not changed.",
+                    "WUP Stream Client updater",MB_OK|MB_ICONERROR);
+        free(u); return 0;
+    }
     free(u);
     PostMessageA(g_win,WM_CLOSE,0,0);
     return 0;
