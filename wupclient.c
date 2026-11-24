@@ -408,27 +408,30 @@ static DWORD WINAPI mic_thread(LPVOID p) {
         if (wait == WAIT_FAILED) break;
         if (wait != WAIT_OBJECT_0) continue;
 
-        /* Dequeue only when the render event requests a new block. Pulling
-           480 samples on every 4 ms timeout drains a 48 kHz stream at up to
-           120 kHz, emptying the FIFO and producing constant crackle/dropouts. */
-        int got = wupstream_mic(a->pad, incoming, 480);
-        if (got > 0) {
-            if (fifo_count + (UINT)got > 24000) {
-                UINT drop = fifo_count + (UINT)got - 24000;
-                fifo_read = (fifo_read + drop) % 48000;
-                fifo_count -= drop;
-                if (src_phase >= drop) src_phase -= drop; else src_phase = 0.0;
-            }
-            for (int i = 0; i < got; i++) fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
-            fifo_count += (UINT)got;
-        }
-
         UINT32 padding = 0;
         if (FAILED(IAudioClient_GetCurrentPadding(cl, &padding))) break;
         UINT32 bufferFrames = 0;
         if (FAILED(IAudioClient_GetBufferSize(cl, &bufferFrames))) break;
         UINT32 frames = bufferFrames > padding ? bufferFrames - padding : 0;
         if (!frames) continue;
+
+        /* A WASAPI event can request more than one 480-sample network chunk.
+           Fill enough of the FIFO for this render block before outputting it. */
+        double step = 48000.0 / (double)fmt->nSamplesPerSec;
+        UINT needed = (UINT)(frames * step + src_phase + 1.0);
+        while (fifo_count < needed && fifo_count < 24000) {
+            int got = wupstream_mic(a->pad, incoming, 480);
+            if (got <= 0) break;
+            if (fifo_count + (UINT)got > 24000) {
+                UINT drop = fifo_count + (UINT)got - 24000;
+                fifo_read = (fifo_read + drop) % 48000;
+                fifo_count -= drop;
+                if (src_phase >= drop) src_phase -= drop; else src_phase = 0.0;
+            }
+            for (int i = 0; i < got; i++)
+                fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
+            fifo_count += (UINT)got;
+        }
         BYTE *dst = NULL;
         if (FAILED(IAudioRenderClient_GetBuffer(render, frames, &dst))) break;
         int ch = fmt->nChannels, bits = fmt->wBitsPerSample;
@@ -436,7 +439,6 @@ static DWORD WINAPI mic_thread(LPVOID p) {
            modulate playback speed to chase FIFO fill, which adds audible
            pitch jitter. If the network briefly underruns, output silence
            without advancing past samples that have not arrived. */
-        double step = 48000.0 / (double)fmt->nSamplesPerSec;
         for (UINT32 i = 0; i < frames; i++) {
             UINT sample_index = (UINT)src_phase;
             int16_t sample = 0;
