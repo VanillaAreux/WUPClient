@@ -18,6 +18,14 @@
 #include <wchar.h>
 
 #include <bcrypt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdarg.h>
+#include "wupstream.h"
+#include "ViGEm/Client.h"
+
+static HWND g_win;
 #define WUPCLIENT_VERSION "2.2.0"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
@@ -112,12 +120,6 @@ static DWORD WINAPI check_updates_thread(LPVOID unused) {
     free(u); free(json); return 0;
 }
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "wupstream.h"
-#include "ViGEm/Client.h"
-
 #define ID_START 101
 #define ID_AUDIO 102
 #define ID_IP    103
@@ -134,7 +136,7 @@ static const GUID MY_IID_Enum   = {0xA95664D2,0x9614,0x4F35,{0xA7,0x46,0xDE,0x8D
 static const GUID MY_IID_Client = {0x1CB9AD4C,0xDBFA,0x4C32,{0xB1,0x78,0xC2,0xF5,0x68,0xA7,0x03,0xB2}};
 static const GUID MY_IID_Capture= {0xC8ADBD64,0xE71E,0x48A0,{0xA4,0xDE,0x18,0x5C,0x39,0x5C,0xD3,0x17}};
 
-static HWND g_win, g_btn, g_audio, g_ip, g_status, g_ctrl, g_ptr;
+static HWND g_btn, g_audio, g_ip, g_status, g_ctrl, g_ptr;
 static volatile LONG g_drawptr = 1;   /* draw our own mouse pointer on the frame (off if the capture already contains one) */
 static volatile LONG g_run;         /* 1 while the user wants streaming */
 static HANDLE g_thread;
