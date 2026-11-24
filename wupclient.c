@@ -35,13 +35,13 @@ static int json_string(const char *json, const char *key, char *out, size_t cap)
     char needle[80]; snprintf(needle, sizeof needle, "\"%s\"", key);
     const char *p = strstr(json, needle); if (!p) return 0;
     p += strlen(needle);
-    while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     if (*p++ != ':') return 0;
-    while (*p == ' ' || *p == '\\t' || *p == '\\r' || *p == '\\n') p++;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
     if (*p++ != '"') return 0;
     size_t n = 0;
     while (*p && *p != '"' && n + 1 < cap) {
-        if (*p == '\\\\' && p[1]) p++;
+        if (*p == '\\' && p[1]) p++;
         out[n++] = *p++;
     }
     out[n] = 0; return *p == '"';
