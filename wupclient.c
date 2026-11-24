@@ -26,7 +26,7 @@
 #include "ViGEm/Client.h"
 
 static HWND g_win;
-#define WUPCLIENT_VERSION "2.3.0"
+#define WUPCLIENT_VERSION "2.3.1"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
@@ -321,7 +321,10 @@ static DWORD WINAPI mic_thread(LPVOID p) {
     HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     IMMDeviceEnumerator *en = NULL; IMMDeviceCollection *devices = NULL;
     IMMDevice *dev = NULL; IAudioClient *cl = NULL; IAudioRenderClient *render = NULL;
-    WAVEFORMATEX *fmt = NULL; int ok = 0;
+    WAVEFORMATEX *fmt = NULL; HANDLE audio_event = NULL; int ok = 0;
+    int16_t fifo[48000], incoming[480];
+    UINT fifo_read = 0, fifo_count = 0;
+    double src_phase = 0.0;
     if (FAILED(CoCreateInstance(&MY_CLSID_Enum, NULL, CLSCTX_ALL, &MY_IID_Enum, (void **)&en))) goto done;
     if (FAILED(IMMDeviceEnumerator_EnumAudioEndpoints(en, eRender, DEVICE_STATE_ACTIVE, &devices))) goto done;
     UINT count = 0; IMMDeviceCollection_GetCount(devices, &count);
@@ -342,48 +345,89 @@ static DWORD WINAPI mic_thread(LPVOID p) {
     if (!dev) { status("GamePad mic: install VB-CABLE and use its CABLE Input playback device"); goto done; }
     if (FAILED(IMMDevice_Activate(dev, &MY_IID_Client, CLSCTX_ALL, NULL, (void **)&cl))) goto done;
     if (FAILED(IAudioClient_GetMixFormat(cl, &fmt))) goto done;
+    int isfloat = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
+        (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE *)fmt)->SubFormat.Data1 == 3);
     if (fmt->nSamplesPerSec < 8000 || fmt->nSamplesPerSec > 192000 ||
-        !(fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT || (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE *)fmt)->SubFormat.Data1 == 3) || fmt->wFormatTag == WAVE_FORMAT_PCM) ||
-        (fmt->wBitsPerSample != 16 && fmt->wBitsPerSample != 32)) {
+        !(isfloat || fmt->wFormatTag == WAVE_FORMAT_PCM ||
+          (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE *)fmt)->SubFormat.Data1 == 1)) ||
+        (fmt->wBitsPerSample != 16 && fmt->wBitsPerSample != 32) ||
+        fmt->nChannels < 1 || fmt->nChannels > 8) {
         status("GamePad mic: unsupported VB-CABLE audio format"); goto done;
     }
-    if (FAILED(IAudioClient_Initialize(cl, AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, fmt, NULL))) goto done;
+    audio_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!audio_event) goto done;
+    if (FAILED(IAudioClient_Initialize(cl, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 1000000, 0, fmt, NULL))) goto done;
+    if (FAILED(IAudioClient_SetEventHandle(cl, audio_event))) goto done;
     if (FAILED(IAudioClient_GetService(cl, &IID_IAudioRenderClient, (void **)&render))) goto done;
-    UINT32 bufferFrames = 0; if (FAILED(IAudioClient_GetBufferSize(cl, &bufferFrames))) goto done;
+
+    /* wupstream_mic is a non-blocking dequeue, not a read that fills the requested
+       amount. Poll it independently and buffer network jitter before rendering. */
+    DWORD prime_start = GetTickCount();
+    while (!*a->stop && fifo_count < 1440 && GetTickCount() - prime_start < 500) {
+        int got = wupstream_mic(a->pad, incoming, 480);
+        if (got > 0) {
+            for (int i = 0; i < got; i++) fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
+            fifo_count += (UINT)got;
+        }
+        if (got <= 0) Sleep(3);
+    }
+    if (*a->stop) goto done;
     if (FAILED(IAudioClient_Start(cl))) goto done;
-    ok = 1; status("GamePad mic active - choose CABLE Output as the microphone in your app");
-    int16_t samples[576];
+    ok = 1; status("GamePad mic active - buffered audio; choose CABLE Output as the microphone in your app");
+
     while (!*a->stop) {
+        DWORD wait = WaitForSingleObject(audio_event, 4);
+        /* Keep draining the network at a steady cadence even if the audio device
+           has a different period or rate. The old implementation only read once
+           per render block and replaced missing network samples with silence. */
+        int got = wupstream_mic(a->pad, incoming, 480);
+        if (got > 0) {
+            if (fifo_count + (UINT)got > 12000) {
+                UINT drop = fifo_count + (UINT)got - 12000;
+                fifo_read = (fifo_read + drop) % 48000;
+                fifo_count -= drop;
+                if (src_phase >= drop) src_phase -= drop; else src_phase = 0.0;
+            }
+            for (int i = 0; i < got; i++) fifo[(fifo_read + fifo_count + i) % 48000] = incoming[i];
+            fifo_count += (UINT)got;
+        }
+        if (wait == WAIT_FAILED) break;
+        if (wait != WAIT_OBJECT_0) continue;
+
         UINT32 padding = 0;
         if (FAILED(IAudioClient_GetCurrentPadding(cl, &padding))) break;
-        UINT32 avail = bufferFrames > padding ? bufferFrames - padding : 0;
-        if (!avail) { Sleep(5); continue; }
-        UINT32 frames = avail > 480 ? 480 : avail;
-        int need = (int)(((uint64_t)frames * 48000 + fmt->nSamplesPerSec - 1) / fmt->nSamplesPerSec);
-        if (need > 576) need = 576;
-        int got = wupstream_mic(a->pad, samples, need);
+        UINT32 bufferFrames = 0;
+        if (FAILED(IAudioClient_GetBufferSize(cl, &bufferFrames))) break;
+        UINT32 frames = bufferFrames > padding ? bufferFrames - padding : 0;
+        if (!frames) continue;
         BYTE *dst = NULL;
         if (FAILED(IAudioRenderClient_GetBuffer(render, frames, &dst))) break;
-        int isfloat = fmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT ||
-            (fmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && ((WAVEFORMATEXTENSIBLE *)fmt)->SubFormat.Data1 == 3);
         int ch = fmt->nChannels, bits = fmt->wBitsPerSample;
+        double step = 48000.0 / (double)fmt->nSamplesPerSec;
         for (UINT32 i = 0; i < frames; i++) {
-            UINT32 si = (UINT32)((double)i * 48000.0 / fmt->nSamplesPerSec);
-            int16_t sample = (got > 0 && si < (UINT32)got) ? samples[si] : 0;
+            UINT sample_index = (UINT)src_phase;
+            int16_t sample = sample_index < fifo_count ? fifo[(fifo_read + sample_index) % 48000] : 0;
+            src_phase += step;
             for (int c = 0; c < ch; c++) {
                 size_t at = ((size_t)i * ch + c) * (bits / 8);
                 if (isfloat) { float v = sample / 32768.0f; memcpy(dst + at, &v, 4); }
                 else if (bits == 16) memcpy(dst + at, &sample, 2);
-                else { int32_t v = (int32_t)sample << 16; memcpy(dst + at, &v, 4); }
+                else { int32_t v = (int32_t)sample * 65536; memcpy(dst + at, &v, 4); }
             }
         }
+        UINT consumed = (UINT)src_phase;
+        src_phase -= consumed;
+        if (consumed > fifo_count) consumed = fifo_count;
+        fifo_read = (fifo_read + consumed) % 48000;
+        fifo_count -= consumed;
         if (FAILED(IAudioRenderClient_ReleaseBuffer(render, frames, 0))) break;
-        Sleep((DWORD)(((uint64_t)frames * 1000) / fmt->nSamplesPerSec));
     }
 done:
-    if (!ok && !*a->stop) status("GamePad mic could not open CABLE Input - check VB-CABLE installation");
+    if (!ok && !*a->stop) status("GamePad mic could not start CABLE Input - check VB-CABLE installation and audio format");
     if (cl) { IAudioClient_Stop(cl); IAudioClient_Release(cl); }
     if (render) IAudioRenderClient_Release(render);
+    if (audio_event) CloseHandle(audio_event);
     if (fmt) CoTaskMemFree(fmt);
     if (dev) IMMDevice_Release(dev);
     if (devices) IMMDeviceCollection_Release(devices);
