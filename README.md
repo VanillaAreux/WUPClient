@@ -135,6 +135,16 @@ cursor=9    ; desktop cursor speed, 1-100
 
 Lower is slower. Restart the app after editing. The file is created the first time you change a setting or start streaming.
 
+## Updates
+
+The client checks the latest GitHub Release in the background at startup. If a newer version is published, it asks before downloading and installing it. The downloaded executable is checked against the SHA-256 digest published by GitHub Releases before the current executable is replaced. The updater then restarts the client.
+
+When publishing a release, bump WUPCLIENT_VERSION in wupclient.c to the release's numeric version (without the leading V). Releases need a Windows executable asset with a SHA-256 digest in GitHub's release metadata.
+
+## Windows UAC prompts
+
+Windows displays UAC consent on its secure desktop by default. For security, WUP Stream Client does not capture or send GamePad input to that desktop. Approve administrator prompts locally on the PC. The ViGEmBus installer continues to use Windows' normal UAC flow.
+
 ## How it works
 
 - **Video:** DXGI Desktop Duplication on the primary monitor, so full-screen games come through. It falls back to GDI ("basic capture" shows in the status line) on old Windows, HDR, rotated, or remote-desktop setups. The picture is scaled to the GamePad's 854x480 and keeps its aspect ratio.
@@ -159,7 +169,7 @@ Source is `wupclient.c`. It needs `wupstream.h`, `libwupstream.a` (libwupstream 
 
 **MSYS2 UCRT64 (as the source header says):** build libwupstream with `host/build.sh` from the wup-stream repo, then link `wupclient.c` against `libwupstream.a`, the ViGEmClient sources, and:
 
-`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lpthread -lm`
+`-mwindows -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 -luuid -lurlmon -lshell32 -lpthread -lm -lbcrypt`
 
 **Linux cross-compile (MinGW-w64):**
 
