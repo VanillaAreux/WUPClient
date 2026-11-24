@@ -18,7 +18,7 @@
 #include <wchar.h>
 
 #include <bcrypt.h>
-#define WUPCLIENT_VERSION "2.1.0"
+#define WUPCLIENT_VERSION "2.2.0"
 #define WM_UPDATE_AVAILABLE (WM_APP + 5)
 typedef struct { char tag[64], url[2048], digest[80]; } update_info;
 static const char RELEASE_API[] = "https://api.github.com/repos/VanillaAreux/WUPClient/releases/latest";
