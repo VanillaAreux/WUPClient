@@ -16,7 +16,7 @@ Built on [libwupstream](https://github.com/ravensclawx/wup-stream) (`host/`). Li
 1. On the Wii U, open **WUP Stream** from the Homebrew Menu.
 2. On the PC, run `wupclient.exe`.
 3. Leave the IP box empty to auto-detect, or type the GamePad's IP.
-4. Pick a control mode, then click **Start streaming**.
+4. Optionally enter a game executable path in **Game executable** (for remote launching), pick a control mode, then click **Start streaming**.
 5. The status line shows the FPS and GamePad battery once connected. If the GamePad drops, the client reconnects on its own.
 
 Your IP, sound, pointer and mode choices are remembered in `wupclient.ini` next to the exe.
@@ -43,6 +43,7 @@ Hold **HOME** and press another button. While HOME is held, nothing else reaches
 | HOME + D-pad **Down** | Desktop |
 | HOME + D-pad **Left** | Off |
 | HOME + **X** | Show / hide the on-screen keyboard |
+| HOME + **Y** | Launch the configured game executable |
 
 Mode order for +/−: Keyboard + mouse, Controller, Desktop, Off, then it wraps.
 
@@ -141,9 +142,13 @@ The client checks the latest GitHub Release in the background at startup. If a n
 
 When publishing a release, bump WUPCLIENT_VERSION in wupclient.c to the release's numeric version (without the leading V). Releases need a Windows executable asset with a SHA-256 digest in GitHub's release metadata.
 
-## Windows UAC prompts
+## Remote game launching and Windows UAC
 
-Windows displays UAC consent on its secure desktop by default. For security, WUP Stream Client does not capture or send GamePad input to that desktop. Approve administrator prompts locally on the PC. The ViGEmBus installer continues to use Windows' normal UAC flow.
+Enter the full path to one game executable in the **Game executable** field before starting the stream. The path is saved in `wupclient.ini`. Hold **HOME** and tap **Y** on the GamePad to launch it. The game is started directly by WUPClient, not through the Windows desktop shell.
+
+For games whose executable requests administrator access, WUPClient must already be running elevated: close it, choose **Run as administrator**, approve that one UAC prompt locally, then reconnect the GamePad. The game inherits WUPClient's already-approved elevated token, avoiding a separate prompt for that launch. Only configure executables you trust.
+
+This is a remote-launch workaround, not full AnyDesk-style secure-desktop control. Windows displays other UAC consent and credential prompts on its secure desktop by default. WUP Stream Client does not capture or send GamePad input to that desktop; unrelated prompts still need local approval. The ViGEmBus installer continues to use Windows' normal UAC flow.
 
 ## How it works
 
