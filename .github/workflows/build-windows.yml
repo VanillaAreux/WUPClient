@@ -55,11 +55,19 @@ jobs:
         shell: msys2 {0}
         run: |
           gcc -O2 -Wall -I wup-stream/host -I ViGEmClient/include -c wupclient.c -o wupclient.o
-          g++ -O2 -mwindows -static-libgcc -static-libstdc++ \
+          g++ -O2 -mwindows -static -static-libgcc -static-libstdc++ \
             wupclient.o wup-stream/build/host/libwupstream.a build-vigem/libViGEmClient.a \
             -o wupclient.exe \
             -ld3d11 -ldxgi -lole32 -lsetupapi -lws2_32 -lwinmm -lgdi32 \
             -luuid -lurlmon -lshell32 -lpropsys -lpthread -lm -lbcrypt
+
+      - name: Verify executable has no MinGW runtime DLL dependencies
+        shell: msys2 {0}
+        run: |
+          if objdump -p wupclient.exe | grep -Ei 'DLL Name: (libwinpthread|libgcc_s|libstdc\\+\\+)'; then
+            echo "Unexpected MinGW runtime DLL dependency found."
+            exit 1
+          fi
 
       - name: Upload Windows executable
         uses: actions/upload-artifact@v4
